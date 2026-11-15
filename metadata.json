@@ -1,0 +1,6 @@
+{
+  "name": "CTR-SIM — 3DS Bootloader & HOME Menu Simulator",
+  "description": "Interactive dual-screen 3DS system simulator featuring a real Stage 1 & Stage 2 bootloader, chunked IndexedDB virtual NAND partitions, and a functional HOME Menu with built-in applets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
