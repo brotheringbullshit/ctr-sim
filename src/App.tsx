@@ -485,6 +485,7 @@ export default function App() {
             <GameNotesApplet
               screen={screen}
               userData={systemState.userData}
+              language={systemState.config.language}
               onUpdateUserData={handleUpdateUserData}
               onExit={() => void handleExitApplet()}
             />
@@ -512,6 +513,7 @@ export default function App() {
             <SoundStudioApplet
               screen={screen}
               userData={systemState.userData}
+              language={systemState.config.language}
               onUpdateUserData={handleUpdateUserData}
               onExit={() => void handleExitApplet()}
             />
@@ -521,6 +523,7 @@ export default function App() {
             <CartridgeGameApplet
               screen={screen}
               userData={systemState.userData}
+              language={systemState.config.language}
               onSaveHighScore={async (score) => {
                 await handleUpdateUserData({
                   ...systemState.userData,
@@ -535,6 +538,7 @@ export default function App() {
             <MiiMakerApplet
               screen={screen}
               userData={systemState.userData}
+              language={systemState.config.language}
               onUpdateUserData={handleUpdateUserData}
               onExit={() => void handleExitApplet()}
             />
@@ -544,6 +548,7 @@ export default function App() {
             <NandToolApplet
               screen={screen}
               partitionChecks={partitionChecks ?? systemState.partitionChecks}
+              language={systemState.config.language}
               onInspectPartition={(id) => {
                 const spec = NAND_PARTITIONS.find((p) => p.id === id);
                 if (spec) setHexChunkModal(spec.startChunk);
@@ -562,6 +567,7 @@ export default function App() {
               kind={activeApplet}
               screen={screen}
               depth3D={depth3D}
+              language={systemState.config.language}
               onExit={() => void handleExitApplet()}
             />
           );

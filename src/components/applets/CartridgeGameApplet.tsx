@@ -1,18 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { UserSaveData } from '../../nand/types';
+import { SupportedLanguage, UserSaveData } from '../../nand/types';
 import { soundEngine } from '../../audio/soundEngine';
+import { getTranslations } from '../../i18n/translations';
 
 interface CartridgeGameProps {
   screen: 'top' | 'bottom';
   userData: UserSaveData;
+  language?: SupportedLanguage;
   onSaveHighScore: (score: number) => Promise<void>;
   onExit: () => void;
 }
 
-// Shared lightweight game state channel per render via props/callbacks isn't needed if parent renders both screens,
-// Wait: ConsoleShell renders top and bottom screens separately! Let's keep game state in module or parent hook?
-// Better: Export a clean GameState hook or store state in a small shared ref/event bus or lift into App?
-// Let's use a tiny shared reactive store right here so both top and bottom screens stay in lockstep at 60fps!
 interface Enemy {
   id: number;
   x: number;
@@ -72,11 +70,13 @@ export function fireStarburstLaser() {
 export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
   screen,
   userData,
+  language,
   onSaveHighScore,
   onExit,
 }) => {
   const [, setTick] = useState(0);
   const highSavedRef = useRef(userData.cartridgeHighScore);
+  const t = getTranslations(language);
 
   useEffect(() => {
     highSavedRef.current = userData.cartridgeHighScore;
@@ -97,8 +97,8 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
 
     const timer = setInterval(() => {
       if (!gState.running) return;
-      let enemies = gState.enemies.map((e) => ({ ...e, y: e.y + e.speed }));
-      let bullets = gState.bullets.map((b) => ({ ...b, y: b.y - 6 })).filter((b) => b.y > -5);
+      const enemies = gState.enemies.map((e) => ({ ...e, y: e.y + e.speed }));
+      const bullets = gState.bullets.map((b) => ({ ...b, y: b.y - 6 })).filter((b) => b.y > -5);
       let score = gState.score;
       let gameOver = false;
 
@@ -153,7 +153,9 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
         {/* HUD */}
         <div className="absolute top-1.5 left-2.5 right-2.5 flex justify-between text-[10px] font-mono z-20 text-sky-300">
           <span>STARBURST PILOT 3D</span>
-          <span>SCORE: {gState.score} · HI: {Math.max(userData.cartridgeHighScore, gState.score)}</span>
+          <span>
+            {t.cartScore}: {gState.score} · {t.cartHighScore}: {Math.max(userData.cartridgeHighScore, gState.score)}
+          </span>
         </div>
 
         {/* Bullets */}
@@ -182,8 +184,10 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
 
         {gState.gameOver && (
           <div className="absolute inset-0 bg-slate-950/80 flex flex-col items-center justify-center z-30">
-            <div className="text-base font-bold text-rose-400 font-display">MISSION OVER</div>
-            <div className="text-xs font-mono text-slate-200 mt-1">Final Score: {gState.score}</div>
+            <div className="text-base font-bold text-rose-400 font-display">{t.cartGameOver}</div>
+            <div className="text-xs font-mono text-slate-200 mt-1">
+              {t.cartScore}: {gState.score}
+            </div>
           </div>
         )}
       </div>
@@ -193,8 +197,8 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
   return (
     <div className="w-full h-full bg-slate-900 text-slate-100 p-3 flex flex-col justify-between select-none">
       <div className="text-[10px] font-mono text-sky-400 flex justify-between">
-        <span>GAME CARD FLIGHT DECK</span>
-        <span>Save: NAND_USERDATA</span>
+        <span>STARBURST 3D</span>
+        <span>NAND_USERDATA</span>
       </div>
 
       <div className="flex items-center justify-center gap-3 my-auto">
@@ -202,19 +206,19 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
           onClick={() => moveStarburstShip(-12)}
           className="px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-bold cursor-pointer active:scale-95"
         >
-          ◀ Left
+          ◀
         </button>
         <button
           onClick={fireStarburstLaser}
           className="px-5 py-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-sm font-bold cursor-pointer active:scale-95"
         >
-          FIRE
+          {t.cartShoot}
         </button>
         <button
           onClick={() => moveStarburstShip(12)}
           className="px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-bold cursor-pointer active:scale-95"
         >
-          Right ▶
+          ▶
         </button>
       </div>
 
@@ -224,16 +228,16 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
             onClick={resetStarburstGame}
             className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-semibold cursor-pointer"
           >
-            Play Again
+            {t.cartPressRestart}
           </button>
         ) : (
-          <span className="text-[10px] text-slate-400">Also playable with D-Pad + A</span>
+          <span className="text-[10px] text-slate-400">D-Pad + [A]</span>
         )}
         <button
           onClick={onExit}
           className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-semibold cursor-pointer"
         >
-          HOME Menu
+          {t.returnHome}
         </button>
       </div>
     </div>

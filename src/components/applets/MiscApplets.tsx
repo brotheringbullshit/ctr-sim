@@ -5,27 +5,31 @@ import {
   NAND_PARTITIONS,
   PartitionId,
   PartitionIntegrity,
+  SupportedLanguage,
   UserSaveData,
 } from '../../nand/types';
 import { CTR_KEYSLOTS } from '../../nand/crypto';
 import { nandDriver } from '../../nand/idbStorage';
+import { getLocalizedTitle, getTranslations } from '../../i18n/translations';
 
 /* ==================== MII MAKER & PLAZA ==================== */
 export const MiiMakerApplet: React.FC<{
   screen: 'top' | 'bottom';
   userData: UserSaveData;
+  language?: SupportedLanguage;
   onUpdateUserData: (next: UserSaveData) => Promise<void>;
   onExit: () => void;
-}> = ({ screen, userData, onUpdateUserData, onExit }) => {
+}> = ({ screen, userData, language, onUpdateUserData, onExit }) => {
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [newName, setNewName] = useState('');
   const selectedMii = userData.miis[selectedIdx] ?? userData.miis[0];
+  const t = getTranslations(language);
 
   if (screen === 'top') {
     return (
       <div className="w-full h-full bg-gradient-to-b from-sky-100 to-emerald-50 text-slate-900 p-4 flex flex-col justify-between select-none">
         <div className="flex justify-between items-center border-b border-sky-200 pb-1">
-          <span className="text-xs font-bold font-display text-sky-900">Mii Maker &amp; Plaza</span>
+          <span className="text-xs font-bold font-display text-sky-900">{t.miiTitle}</span>
           <span className="text-[10px] font-mono text-sky-700">{userData.miis.length} Miis in NAND</span>
         </div>
 
@@ -97,7 +101,7 @@ export const MiiMakerApplet: React.FC<{
         <input
           type="text"
           maxLength={12}
-          placeholder="New Mii name..."
+          placeholder={`${t.miiName}...`}
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           className="flex-1 px-2 py-1 rounded border border-slate-300 text-xs"
@@ -106,7 +110,7 @@ export const MiiMakerApplet: React.FC<{
           onClick={addMii}
           className="px-3 py-1 rounded bg-sky-600 hover:bg-sky-500 text-white text-[10px] font-semibold cursor-pointer"
         >
-          Create
+          {t.miiSaveMii}
         </button>
       </div>
 
@@ -115,7 +119,7 @@ export const MiiMakerApplet: React.FC<{
           onClick={onExit}
           className="px-3 py-1 rounded bg-slate-800 text-white text-[10px] font-semibold cursor-pointer"
         >
-          Back to HOME
+          {t.returnHome}
         </button>
       </div>
     </div>
@@ -163,6 +167,7 @@ function useSharedNand() {
 export interface NandToolAppletProps {
   screen: 'top' | 'bottom';
   partitionChecks: Record<PartitionId, PartitionIntegrity>;
+  language?: SupportedLanguage;
   onInspectPartition: (id: PartitionId) => void;
   onInspectChunk?: (chunkIndex: number) => void;
   onExportNandBin: () => Promise<void>;
@@ -173,6 +178,7 @@ export interface NandToolAppletProps {
 export const NandToolApplet: React.FC<NandToolAppletProps> = ({
   screen,
   partitionChecks,
+  language,
   onInspectPartition,
   onInspectChunk,
   onExportNandBin,
@@ -182,6 +188,7 @@ export const NandToolApplet: React.FC<NandToolAppletProps> = ({
   const shared = useSharedNand();
   const [binMsg, setBinMsg] = useState<string | null>(null);
   const fileRef = React.useRef<HTMLInputElement | null>(null);
+  const t = getTranslations(language);
 
   // Sync with driver events
   React.useEffect(() => {
@@ -476,7 +483,9 @@ export const NandToolApplet: React.FC<NandToolAppletProps> = ({
           }}
           className="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[9px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
         >
-          {shared.tab === 'io_trace' && shared.selectedIO ? `Hex Chunk #${shared.selectedIO.chunkIndex}` : 'Hex Editor'}
+          {shared.tab === 'io_trace' && shared.selectedIO
+            ? `Hex #${shared.selectedIO.chunkIndex}`
+            : t.nandInspectPartition}
         </button>
         {shared.tab === 'partitions' && (
           <>
@@ -491,13 +500,13 @@ export const NandToolApplet: React.FC<NandToolAppletProps> = ({
               }}
               className="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-[9px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
             >
-              Save .bin
+              {t.nandExportBin}
             </button>
             <button
               onClick={() => fileRef.current?.click()}
               className="px-2 py-1 rounded bg-amber-700 hover:bg-amber-600 text-white text-[9px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
             >
-              Restore .bin
+              {t.nandImportBin}
             </button>
             <input
               ref={fileRef}
@@ -521,7 +530,7 @@ export const NandToolApplet: React.FC<NandToolAppletProps> = ({
           onClick={onExit}
           className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white text-[9px] font-semibold cursor-pointer whitespace-nowrap ml-auto shrink-0"
         >
-          Back
+          {t.back}
         </button>
       </div>
     </div>
@@ -533,15 +542,19 @@ export const SimpleInfoApplet: React.FC<{
   kind: 'health-safety' | 'camera-ar' | 'browser';
   screen: 'top' | 'bottom';
   depth3D: number;
+  language?: SupportedLanguage;
   onExit: () => void;
-}> = ({ kind, screen, depth3D, onExit }) => {
+}> = ({ kind, screen, depth3D, language, onExit }) => {
+  const t = getTranslations(language);
+  const titleMeta = getLocalizedTitle(kind, language);
+
   if (kind === 'camera-ar') {
     if (screen === 'top') {
       return (
         <div className="w-full h-full bg-slate-950 text-white p-4 flex flex-col justify-between relative overflow-hidden">
           <div className="text-[10px] font-mono text-pink-400 flex justify-between">
-            <span>3DS STEREO CAMERA CALIBRATOR</span>
-            <span>3D PARALLAX: {Math.round(depth3D * 100)}%</span>
+            <span>{titleMeta.shortName.toUpperCase()}</span>
+            <span>3D: {Math.round(depth3D * 100)}%</span>
           </div>
           <div className="flex items-center justify-center gap-6 my-auto">
             <div
@@ -557,20 +570,16 @@ export const SimpleInfoApplet: React.FC<{
               R-EYE
             </div>
           </div>
-          <div className="text-[10px] text-slate-400 text-center">
-            Slide the physical 3D Depth control to see stereographic separation.
-          </div>
+          <div className="text-[10px] text-slate-400 text-center">{titleMeta.description}</div>
         </div>
       );
     }
     return (
       <div className="w-full h-full bg-slate-900 text-slate-200 p-3 flex flex-col justify-between">
-        <div className="text-xs font-semibold">Dual-Lens Optical Test</div>
-        <p className="text-[11px] text-slate-400">
-          Use the 3D slider on the right side of the upper lid bezel to test left/right eye parallax offset.
-        </p>
+        <div className="text-xs font-semibold">{titleMeta.fullName}</div>
+        <p className="text-[11px] text-slate-400">{titleMeta.description}</p>
         <button onClick={onExit} className="w-full py-1.5 rounded bg-slate-800 text-xs font-semibold cursor-pointer">
-          Return to HOME
+          {t.returnHome}
         </button>
       </div>
     );
@@ -584,25 +593,25 @@ export const SimpleInfoApplet: React.FC<{
             ctr://nand.local/boot-architecture
           </div>
           <div className="my-auto space-y-1.5">
-            <div className="text-sm font-bold font-display text-sky-800">CTR-SIM Boot Architecture</div>
+            <div className="text-sm font-bold font-display text-sky-800">{titleMeta.fullName}</div>
             <p className="text-[10.5px] text-slate-600 leading-relaxed">
               1. Boot9 &amp; Boot11 init AES/RSA engines and validate NCSD/FIRM.<br />
               2. Sections load to ARM9/ARM11, BootROM halves lock, CPUs jump.<br />
               3. Kernel9 (OTP lock + Process9) &amp; Kernel11 start pm, sm, fs, pxi &amp; NS (ErrDisp) before HOME loads.
             </p>
           </div>
-          <div className="text-[10px] text-slate-400">CTR-Net Local Intranet Viewer</div>
+          <div className="text-[10px] text-slate-400">{titleMeta.description}</div>
         </div>
       );
     }
     return (
       <div className="w-full h-full bg-slate-50 text-slate-800 p-3 flex flex-col justify-between">
-        <div className="text-xs font-semibold">Hardware Recovery Tip</div>
+        <div className="text-xs font-semibold">{titleMeta.shortName}</div>
         <div className="text-[11px] text-slate-600 bg-white p-2 rounded border border-slate-200">
-          Open the CTR-NAND Tool to inspect chunks or inject a byte fault, then reboot—or power off and hold START + POWER for Recovery.
+          {titleMeta.description}
         </div>
         <button onClick={onExit} className="w-full py-1.5 rounded bg-slate-800 text-white text-xs font-semibold cursor-pointer">
-          Close Browser
+          {t.returnHome}
         </button>
       </div>
     );
@@ -612,20 +621,23 @@ export const SimpleInfoApplet: React.FC<{
   if (screen === 'top') {
     return (
       <div className="w-full h-full bg-amber-50 text-slate-900 p-4 flex flex-col justify-between">
-        <div className="text-sm font-bold font-display text-amber-900">Health &amp; Safety Information</div>
-        <p className="text-[11px] text-slate-700 leading-relaxed">
-          All system titles, Play Coins, Game Notes, and firmware settings in CTR-SIM are persisted inside real 16 KB Uint8Array chunks in your browser&apos;s IndexedDB Virtual NAND.
-        </p>
+        <div className="text-sm font-bold font-display text-amber-900">{t.healthTitle}</div>
+        <div className="space-y-1 text-[11px] text-slate-700 leading-relaxed">
+          <p className="font-semibold text-amber-950">{t.healthWarning}</p>
+          <p>• {t.health3DPrecaution}</p>
+          <p>• {t.healthFatigueWarning}</p>
+          <p className="text-[10px] text-amber-900 pt-1">{t.healthNandInfo}</p>
+        </div>
         <div className="text-[10px] font-mono text-amber-800">Title ID: 0004001000021300</div>
       </div>
     );
   }
   return (
     <div className="w-full h-full bg-white text-slate-800 p-3 flex flex-col justify-between">
-      <div className="text-xs font-semibold">Touch Screen Calibration: Nominal</div>
-      <p className="text-[11px] text-slate-500">Keyboard shortcuts: Arrow Keys navigate, Enter opens, Esc/H returns HOME.</p>
+      <div className="text-xs font-semibold">{t.healthTitle}</div>
+      <p className="text-[11px] text-slate-500">{t.healthNandInfo}</p>
       <button onClick={onExit} className="w-full py-1.5 rounded bg-slate-800 text-white text-xs font-semibold cursor-pointer">
-        OK · Return to HOME
+        {t.returnHome}
       </button>
     </div>
   );

@@ -13,8 +13,10 @@ import {
   buildFirm0Partition,
   buildFirm1Partition,
   buildNcsdHeader,
+  buildNcsdHeaderFromHashes,
   buildSysDataPartition,
   buildUserDataPartition,
+  parseNcsdHeader,
   getDefaultStage1Opcodes,
   getDefaultStage2Header,
   getDefaultSystemConfig,
@@ -23,6 +25,7 @@ import {
 } from './payloads';
 import {
   CTR_KEYSLOTS,
+  computeSHA256Hex,
   decryptPartition,
   encryptPartition,
 } from './crypto';
@@ -274,9 +277,41 @@ class NandIDBDriver {
   }
 
   /**
-   * Recomputes NCSD_HDR SHA-256 digests over current encrypted IDB partition contents and signs with RSA-2048.
+   * Recomputes NCSD_HDR SHA-256 digests. If modifiedPartitionId & modifiedCiphertext are provided,
+   * reuses existing hashes from current NCSD header for unmodified partitions without reading all chunks.
    */
-  async syncNcsdDigests(): Promise<void> {
+  async syncNcsdDigests(modifiedPartitionId?: PartitionId, modifiedCiphertext?: Uint8Array): Promise<void> {
+    try {
+      const ncsdChunk = await this.readChunk(0);
+      const parsed = await parseNcsdHeader(ncsdChunk);
+      if (parsed.ok) {
+        const hashes: Record<Exclude<PartitionId, 'ncsd_hdr'>, string> = {
+          firm0_boot1: parsed.records['firm0_boot1']?.sha256 || '',
+          firm1_stage2: parsed.records['firm1_stage2']?.sha256 || '',
+          twl_sysdata: parsed.records['twl_sysdata']?.sha256 || '',
+          ctrnand_sys: parsed.records['ctrnand_sys']?.sha256 || '',
+          nand_userdata: parsed.records['nand_userdata']?.sha256 || '',
+        };
+
+        if (modifiedPartitionId && modifiedPartitionId !== 'ncsd_hdr') {
+          if (modifiedCiphertext) {
+            hashes[modifiedPartitionId] = await computeSHA256Hex(modifiedCiphertext);
+          } else {
+            const partBuf = await this.readPartition(modifiedPartitionId);
+            hashes[modifiedPartitionId] = await computeSHA256Hex(partBuf);
+          }
+        }
+
+        if (Object.values(hashes).every((h) => h.length === 64)) {
+          const ncsd = await buildNcsdHeaderFromHashes(hashes);
+          await this.writePartitionRaw('ncsd_hdr', ncsd);
+          return;
+        }
+      }
+    } catch {
+      // Fallback to full read if any error occurs
+    }
+
     const [firm0, firm1, sysdata, ctrnand, userdata] = await Promise.all([
       this.readPartition('firm0_boot1'),
       this.readPartition('firm1_stage2'),
@@ -301,7 +336,7 @@ class NandIDBDriver {
     const plaintext = buildSysDataPartition(config);
     const ciphertext = await encryptPartition('twl_sysdata', plaintext);
     await this.writePartitionRaw('twl_sysdata', ciphertext);
-    await this.syncNcsdDigests();
+    await this.syncNcsdDigests('twl_sysdata', ciphertext);
   }
 
   /**
@@ -311,7 +346,7 @@ class NandIDBDriver {
     const plaintext = buildUserDataPartition(userData);
     const ciphertext = await encryptPartition('nand_userdata', plaintext);
     await this.writePartitionRaw('nand_userdata', ciphertext);
-    await this.syncNcsdDigests();
+    await this.syncNcsdDigests('nand_userdata', ciphertext);
   }
 
   /**
@@ -321,7 +356,7 @@ class NandIDBDriver {
     const plaintext = buildFirm1Partition(header);
     const ciphertext = await encryptPartition('firm1_stage2', plaintext);
     await this.writePartitionRaw('firm1_stage2', ciphertext);
-    await this.syncNcsdDigests();
+    await this.syncNcsdDigests('firm1_stage2', ciphertext);
   }
 
   /**
@@ -466,7 +501,7 @@ class NandIDBDriver {
     }
     const ciphertext = await encryptPartition(id, rawPlaintext);
     await this.writePartitionRaw(id, ciphertext);
-    await this.syncNcsdDigests();
+    await this.syncNcsdDigests(id, ciphertext);
   }
 
   async exportFullNandBin(): Promise<Uint8Array> {

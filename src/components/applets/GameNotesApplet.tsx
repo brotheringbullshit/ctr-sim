@@ -1,9 +1,11 @@
 import React, { useRef, useState } from 'react';
-import { GameNoteRecord, UserSaveData } from '../../nand/types';
+import { GameNoteRecord, SupportedLanguage, UserSaveData } from '../../nand/types';
+import { getTranslations } from '../../i18n/translations';
 
 interface GameNotesProps {
   screen: 'top' | 'bottom';
   userData: UserSaveData;
+  language?: SupportedLanguage;
   onUpdateUserData: (next: UserSaveData) => Promise<void>;
   onExit: () => void;
 }
@@ -13,6 +15,7 @@ const INK_COLORS = ['#0f172a', '#0284c7', '#e11d48', '#059669'];
 export const GameNotesApplet: React.FC<GameNotesProps> = ({
   screen,
   userData,
+  language,
   onUpdateUserData,
   onExit,
 }) => {
@@ -21,14 +24,19 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
   const [draftStrokes, setDraftStrokes] = useState<GameNoteRecord['strokes']>([]);
   const [isDrawing, setIsDrawing] = useState(false);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const t = getTranslations(language);
 
   if (screen === 'top') {
     const activeNote = userData.notes[selectedNoteIdx] ?? userData.notes[0];
     return (
       <div className="w-full h-full bg-amber-50 text-slate-900 p-3 flex flex-col justify-between select-none">
         <div className="flex items-center justify-between border-b border-amber-200 pb-1">
-          <div className="text-xs font-bold font-display text-amber-900">Game Notes · Saved in NAND_USERDATA</div>
-          <div className="text-[10px] font-mono text-amber-700">{userData.notes.length} notes</div>
+          <div className="text-xs font-bold font-display text-amber-900">
+            {t.notesTitle} · NAND_USERDATA
+          </div>
+          <div className="text-[10px] font-mono text-amber-700">
+            {userData.notes.length} {t.notesSavedMemos}
+          </div>
         </div>
 
         <div className="flex-1 my-2 bg-white rounded-lg border border-amber-200 relative overflow-hidden flex items-center justify-center">
@@ -55,12 +63,12 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
               ))}
             </svg>
           ) : (
-            <span className="text-xs text-slate-400">No notes saved yet</span>
+            <span className="text-xs text-slate-400 px-3 text-center">{t.notesNoNotes}</span>
           )}
         </div>
 
         <div className="flex items-center justify-between text-[10px] text-amber-800">
-          <span>{activeNote ? `${activeNote.title} (${activeNote.createdAt})` : 'Draw below and save'}</span>
+          <span>{activeNote ? `${activeNote.title} (${activeNote.createdAt})` : t.notesNoNotes}</span>
           <div className="flex gap-1">
             {userData.notes.map((n, idx) => (
               <button
@@ -144,14 +152,14 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
             onClick={() => setDraftStrokes([])}
             className="px-2 py-0.5 rounded bg-white border border-amber-300 text-[10px] font-medium text-slate-700 cursor-pointer"
           >
-            Clear
+            {t.notesClear}
           </button>
           <button
             onClick={handleSaveNote}
             disabled={draftStrokes.length === 0}
             className="px-2.5 py-0.5 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-[10px] font-semibold cursor-pointer"
           >
-            Save to NAND
+            {t.notesSaveMemo}
           </button>
         </div>
       </div>
@@ -178,12 +186,12 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
       </svg>
 
       <div className="flex justify-between items-center mt-1">
-        <span className="text-[10px] text-amber-800">Draw on touch canvas</span>
+        <span className="text-[10px] text-amber-800">{t.notesPen}</span>
         <button
           onClick={onExit}
           className="px-3 py-1 rounded bg-slate-800 text-white text-[10px] font-semibold cursor-pointer"
         >
-          Back to HOME
+          {t.returnHome}
         </button>
       </div>
     </div>

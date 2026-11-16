@@ -546,6 +546,48 @@ export async function buildNcsdHeader(
   return buf;
 }
 
+export async function buildNcsdHeaderFromHashes(
+  hashes: Record<Exclude<PartitionId, 'ncsd_hdr'>, string>
+): Promise<Uint8Array> {
+  const size = getPartitionByteSize('ncsd_hdr');
+  const buf = new Uint8Array(size);
+
+  writeAsciiFixed(buf, 0x100, 'NCSD', 4);
+  writeUint32LE(buf, 0x104, 256);
+  writeUint32LE(buf, 0x108, CHUNK_SIZE);
+  writeAsciiFixed(buf, 0x10c, 'CTR-001-VIRTUAL', 20);
+
+  const orderedIds: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
+    'firm0_boot1',
+    'firm1_stage2',
+    'twl_sysdata',
+    'ctrnand_sys',
+    'nand_userdata',
+  ];
+
+  let entryOffset = 0x130;
+  for (const id of orderedIds) {
+    const spec = NAND_PARTITIONS.find((p) => p.id === id)!;
+    const hashHex = hashes[id] || '0'.repeat(64);
+    writeAsciiFixed(buf, entryOffset, id, 16);
+    writeUint32LE(buf, entryOffset + 16, spec.startChunk);
+    writeUint32LE(buf, entryOffset + 20, spec.endChunk);
+    writeAsciiFixed(buf, entryOffset + 24, hashHex, 64);
+    entryOffset += 96;
+  }
+
+  const tableCrc = computeCRC32(buf.slice(0x130, 0x500));
+  writeUint32LE(buf, 0x120, tableCrc);
+
+  buf[0x5fe] = 0x55;
+  buf[0x5ff] = 0xaa;
+
+  const sigBytes = await signRsa2048(buf.slice(0x100, 0x500));
+  buf.set(sigBytes, 0x00);
+
+  return buf;
+}
+
 export async function parseNcsdHeader(
   buf: Uint8Array
 ): Promise<{ ok: true; magic: string; records: Record<string, NcsdPartitionRecord> } | { ok: false; magic: string; reason: string }> {

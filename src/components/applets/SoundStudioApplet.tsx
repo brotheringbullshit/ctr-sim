@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { UserSaveData } from '../../nand/types';
+import { SupportedLanguage, UserSaveData } from '../../nand/types';
 import { soundEngine } from '../../audio/soundEngine';
+import { getTranslations } from '../../i18n/translations';
 
 interface SoundStudioProps {
   screen: 'top' | 'bottom';
   userData: UserSaveData;
+  language?: SupportedLanguage;
   onUpdateUserData: (next: UserSaveData) => Promise<void>;
   onExit: () => void;
 }
@@ -23,12 +25,14 @@ const SCALE_NOTES = [
 export const SoundStudioApplet: React.FC<SoundStudioProps> = ({
   screen,
   userData,
+  language,
   onUpdateUserData,
   onExit,
 }) => {
   const [pattern, setPattern] = useState<number[]>(userData.synthPattern);
   const [playing, setPlaying] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
+  const t = getTranslations(language);
 
   useEffect(() => {
     if (!playing) return;
@@ -47,8 +51,8 @@ export const SoundStudioApplet: React.FC<SoundStudioProps> = ({
     return (
       <div className="w-full h-full bg-slate-950 text-rose-50 p-3.5 flex flex-col justify-between select-none">
         <div className="flex items-center justify-between border-b border-slate-800 pb-1">
-          <div className="text-xs font-bold font-display text-rose-400">Nintendo 3DS Sound</div>
-          <div className="text-[10px] font-mono text-slate-400">DSP Sequencer · 8 Steps</div>
+          <div className="text-xs font-bold font-display text-rose-400">{t.soundTitle}</div>
+          <div className="text-[10px] font-mono text-slate-400">{t.soundSynthStudio}</div>
         </div>
 
         <div className="flex-1 flex items-end justify-center gap-2 py-3">
@@ -70,8 +74,8 @@ export const SoundStudioApplet: React.FC<SoundStudioProps> = ({
         </div>
 
         <div className="text-[10px] text-slate-400 font-mono flex justify-between">
-          <span>{playing ? `Playing Step #${activeStep + 1}` : 'Ready'}</span>
-          <span>Saved in NAND_USERDATA</span>
+          <span>{playing ? `#${activeStep + 1}` : 'NAND_USERDATA'}</span>
+          <span>{t.synced}</span>
         </div>
       </div>
     );
@@ -106,20 +110,20 @@ export const SoundStudioApplet: React.FC<SoundStudioProps> = ({
               playing ? 'bg-amber-600 text-white' : 'bg-rose-600 text-white'
             }`}
           >
-            {playing ? 'Stop' : 'Play Loop'}
+            {playing ? t.soundStop : t.soundPlay}
           </button>
           <button
             onClick={() => onUpdateUserData({ ...userData, synthPattern: pattern })}
             className="px-2.5 py-1 rounded bg-white border border-rose-300 text-rose-700 text-[10px] font-semibold cursor-pointer"
           >
-            Save
+            {t.save}
           </button>
         </div>
         <button
           onClick={onExit}
           className="px-3 py-1 rounded bg-slate-800 text-white text-[10px] font-semibold cursor-pointer"
         >
-          Back
+          {t.back}
         </button>
       </div>
     </div>

@@ -250,6 +250,10 @@ export interface ChunkIOEvent {
   op: 'read' | 'write' | 'corrupt';
   partitionId: PartitionId;
   timestamp: number;
+  byteOffset?: number;
+  byteLength?: number;
+  keyslot?: string;
+  details?: string;
 }
 
 export interface LoadedSystemState {
