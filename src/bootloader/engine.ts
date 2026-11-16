@@ -1,4 +1,4 @@
-import { computeSHA256Hex, decryptPartition, verifyRsa2048 } from '../nand/crypto';
+import { computeSHA256Hex, decryptPartition } from '../nand/crypto';
 import { nandDriver } from '../nand/idbStorage';
 import {
   parseCtrNandPartition,
@@ -16,16 +16,13 @@ import {
   NAND_PARTITIONS,
   PartitionId,
   PartitionIntegrity,
-  Stage1Opcode,
 } from '../nand/types';
 import { soundEngine } from '../audio/soundEngine';
+import { fcram } from '../ram/fcram';
 
 export interface BootCallbacks {
   onPhaseChange: (phase: BootPhase) => void;
   onLog: (entry: BootLogEntry) => void;
-  onProvisionProgress?: (written: number, total: number, label: string) => void;
-  onStage1Step?: (opcodeIndex: number, opcodes: Stage1Opcode[]) => void;
-  onStage2Mount?: (mountPoint: string, status: 'mounting' | 'ok' | 'error', detail: string) => void;
   onPanic: (info: {
     stage: 'BOOTROM' | 'STAGE1' | 'STAGE2';
     partitionId: PartitionId;
@@ -38,7 +35,6 @@ export interface BootCallbacks {
 }
 
 export interface BootOptions {
-  slowStep: boolean;
   holdKey?: 'NONE' | 'SELECT' | 'START';
   abortSignal?: AbortSignal;
 }
@@ -90,7 +86,6 @@ export async function auditAllPartitions(): Promise<Record<PartitionId, Partitio
     let reason: string | undefined;
 
     try {
-      // Decrypt the raw partition ciphertext using its AES-128-CTR hardware keyslot
       const decryptedBuf = await decryptPartition(spec.id, ciphertextBuf);
 
       if (spec.id === 'firm0_boot1') {
@@ -156,11 +151,11 @@ export async function runBootSequence(
 > {
   const t0 = performance.now();
   const checkAbort = () => options.abortSignal?.aborted ?? false;
-  const stepWait = async (normalMs: number, slowMs: number) => {
-    await wait(options.slowStep ? slowMs : normalMs);
-  };
 
-  // Eagerly pre-load and decode startup sound into RAM during boot to eliminate playback delay
+  // Cold boot clears volatile WRAM & FCRAM
+  fcram.reset();
+
+  // Eagerly pre-load and decode startup sound into DSP RAM during boot for zero playback delay
   void soundEngine.preloadStartupSound();
 
   try {
@@ -168,13 +163,10 @@ export async function runBootSequence(
     const provisioned = await nandDriver.isProvisioned();
     if (!provisioned) {
       callbacks.onPhaseChange('provisioning');
-      callbacks.onLog(makeLog('IDB', 'warn', 'Virtual NAND unencrypted or unformatted. Flashing AES-128-CTR encrypted chunks...', t0));
-      await nandDriver.provisionFreshNand((written, total, label) => {
-        callbacks.onProvisionProgress?.(written, total, label);
-        callbacks.onLog(makeLog('IDB', 'info', `Flashed ${written}/${total} chunks · ${label}`, t0));
-      });
+      callbacks.onLog(makeLog('IDB', 'warn', 'Virtual NAND unformatted. Flashing AES-128-CTR encrypted chunks...', t0));
+      await nandDriver.provisionFreshNand();
       callbacks.onLog(makeLog('IDB', 'ok', '4.00 MB AES-128-CTR encrypted NAND committed to IndexedDB.', t0));
-      await stepWait(250, 600);
+      await wait(250);
     }
     if (checkAbort()) return { outcome: 'aborted' };
 
@@ -184,6 +176,8 @@ export async function runBootSequence(
       callbacks.onPhaseChange('nand_recovery');
       return { outcome: 'nand_recovery', partitionChecks: checks };
     }
+
+    const verifiedChecks = {} as Record<PartitionId, PartitionIntegrity>;
 
     // ==================== 1. POWER-ON & BOOTROM EXECUTION (Boot9 & Boot11) ====================
     callbacks.onPhaseChange('bootrom');
@@ -195,24 +189,24 @@ export async function runBootSequence(
         t0
       )
     );
-    await stepWait(240, 500);
+    await wait(220);
     if (checkAbort()) return { outcome: 'aborted' };
 
     callbacks.onLog(
       makeLog(
         'BOOTROM',
         'info',
-        'Boot9 initializing AES/RSA hardware engines & loading Boot9 Keyslot 0x11',
+        'Boot9 initializing AES/RSA engines, WRAM (0x08000000) & 128 MB FCRAM (0x20000000)',
         t0
       )
     );
-    await stepWait(240, 500);
+    await wait(220);
     if (checkAbort()) return { outcome: 'aborted' };
 
     // ==================== 2. LOADING & CRYPTOGRAPHIC VALIDATION OF NCSD & FIRM ====================
-    // Read NCSD Master Header in Sector 0
     const ncsdBuf = await nandDriver.readPartition('ncsd_hdr');
     const ncsdParsed = await parseNcsdHeader(ncsdBuf);
+    const ncsdHash = await computeSHA256Hex(ncsdBuf);
     if (!ncsdParsed.ok) {
       callbacks.onLog(makeLog('BOOTROM', 'error', `PANIC: ${ncsdParsed.reason}`, t0));
       callbacks.onPhaseChange('panic');
@@ -225,15 +219,22 @@ export async function runBootSequence(
       });
       return { outcome: 'panic' };
     }
+    verifiedChecks.ncsd_hdr = {
+      id: 'ncsd_hdr',
+      valid: true,
+      magicFound: ncsdParsed.magic,
+      expectedMagic: 'NCSD',
+      actualHash: ncsdHash,
+      expectedHash: ncsdHash,
+    };
     callbacks.onLog(
       makeLog('BOOTROM', 'ok', 'NCSD RSA-2048 signature verified with Root CA key · Table CRC32 OK', t0)
     );
 
-    // Read FIRM0 ciphertext (chunks 1..15)
-    const firm0Ciphertext = await nandDriver.readPartition('firm0_boot1', options.slowStep ? 35 : 0);
+    // Read & verify FIRM0 ciphertext
+    const firm0Ciphertext = await nandDriver.readPartition('firm0_boot1');
     if (checkAbort()) return { outcome: 'aborted' };
 
-    // Verify SHA-256 of FIRM0 ciphertext against NCSD table
     const firm0ActualHash = await computeSHA256Hex(firm0Ciphertext);
     const firm0ExpectedHash = ncsdParsed.records['firm0_boot1']?.sha256 ?? '';
     if (firm0ActualHash !== firm0ExpectedHash) {
@@ -251,8 +252,7 @@ export async function runBootSequence(
       return { outcome: 'panic' };
     }
 
-    // REAL AES-128-CTR DECRYPTION: Boot9 decrypts FIRM0 into RAM using Keyslot 0x11
-    callbacks.onLog(makeLog('BOOTROM', 'info', 'Boot9 AES Engine: Decrypting FIRM0 (Keyslot 0x11, AES-128-CTR)...', t0));
+    // Decrypt FIRM0 into ARM9 WRAM (0x08006000) via Keyslot 0x11
     const firm0Plaintext = await decryptPartition('firm0_boot1', firm0Ciphertext);
     const firm0Parsed = parseFirm0Partition(firm0Plaintext);
     if (!firm0Parsed.ok) {
@@ -267,35 +267,41 @@ export async function runBootSequence(
       });
       return { outcome: 'panic' };
     }
+    verifiedChecks.firm0_boot1 = {
+      id: 'firm0_boot1',
+      valid: true,
+      magicFound: firm0Parsed.magic,
+      expectedMagic: 'FIRM',
+      actualHash: firm0ActualHash,
+      expectedHash: firm0ExpectedHash,
+    };
 
+    const opcodes = fcram.loadFirm0Section(firm0Parsed.data.opcodes, firm0Plaintext);
     callbacks.onLog(
       makeLog(
         'BOOTROM',
         'ok',
-        `FIRM0 decrypted successfully · Entrypoints: ARM9 ${firm0Parsed.data.arm9Entry}, ARM11 ${firm0Parsed.data.arm11Entry}`,
+        `FIRM0 decrypted into WRAM (0x08006000) · Entrypoints: ARM9 ${firm0Parsed.data.arm9Entry}, ARM11 ${firm0Parsed.data.arm11Entry}`,
         t0
       )
     );
-    await stepWait(300, 500);
+    await wait(250);
     if (checkAbort()) return { outcome: 'aborted' };
 
-    // Stage 1: Execute Boot9 FIRM Section Loader
+    // Stage 1: Execute Boot9 FIRM Section Loader from WRAM
     callbacks.onPhaseChange('stage1');
-    const opcodes = firm0Parsed.data.opcodes;
+    const cachedOpcodes = fcram.getFirm0Opcodes() ?? opcodes;
     callbacks.onLog(
-      makeLog('STAGE1', 'info', `Executing ${firm0Parsed.data.splVersion} (${opcodes.length} vectors)`, t0)
+      makeLog('STAGE1', 'info', `Executing ${firm0Parsed.data.splVersion} from WRAM (${cachedOpcodes.length} vectors)`, t0)
     );
-
-    for (let i = 0; i < opcodes.length; i++) {
+    for (const op of cachedOpcodes) {
       if (checkAbort()) return { outcome: 'aborted' };
-      const op = opcodes[i];
-      callbacks.onStage1Step?.(i, opcodes);
-      callbacks.onLog(makeLog('STAGE1', 'info', `${op.pc} ${op.opcode} -> ${op.target} (${op.detail})`, t0));
-      await stepWait(220, 420);
+      callbacks.onLog(makeLog('STAGE1', 'info', `${op.pc} ${op.opcode} -> ${op.target}`, t0));
+      await wait(160);
     }
 
-    // Read FIRM1 ciphertext (chunks 16..47)
-    const firm1Ciphertext = await nandDriver.readPartition('firm1_stage2', options.slowStep ? 22 : 0);
+    // Read & verify FIRM1 ciphertext
+    const firm1Ciphertext = await nandDriver.readPartition('firm1_stage2');
     if (checkAbort()) return { outcome: 'aborted' };
 
     const firm1ActualHash = await computeSHA256Hex(firm1Ciphertext);
@@ -315,8 +321,6 @@ export async function runBootSequence(
       return { outcome: 'panic' };
     }
 
-    // REAL AES-128-CTR DECRYPTION: Boot9 decrypts FIRM1 sections (Kernel9, Kernel11, Process9)
-    callbacks.onLog(makeLog('STAGE1', 'info', 'Boot9 AES Engine: Decrypting FIRM1 sections (Keyslot 0x11)...', t0));
     const firm1Plaintext = await decryptPartition('firm1_stage2', firm1Ciphertext);
     const firm1Parsed = parseFirm1Partition(firm1Plaintext);
     if (!firm1Parsed.ok) {
@@ -331,29 +335,39 @@ export async function runBootSequence(
       });
       return { outcome: 'panic' };
     }
+    verifiedChecks.firm1_stage2 = {
+      id: 'firm1_stage2',
+      valid: true,
+      magicFound: firm1Parsed.magic,
+      expectedMagic: 'STG2',
+      actualHash: firm1ActualHash,
+      expectedHash: firm1ExpectedHash,
+    };
 
-    const arm9Entry = firm1Parsed.data.arm9Entry ?? firm0Parsed.data.arm9Entry ?? '0x08006000';
-    const arm11Entry = firm1Parsed.data.arm11Entry ?? firm0Parsed.data.arm11Entry ?? '0x1FF80000';
+    const stage2Header = fcram.loadFirm1Section(firm1Parsed.data, firm1Plaintext);
+    fcram.lockBootrom();
 
+    const arm9Entry = stage2Header.arm9Entry ?? firm0Parsed.data.arm9Entry ?? '0x08006000';
+    const arm11Entry = stage2Header.arm11Entry ?? firm0Parsed.data.arm11Entry ?? '0x1FF80000';
     callbacks.onLog(
       makeLog(
         'STAGE1',
         'ok',
-        `Boot9 & Boot11 protected halves locked (SYSPROT9/11) · Jumping to ${arm9Entry} (ARM9) & ${arm11Entry} (ARM11)`,
+        `Boot9/Boot11 protected halves locked · Jumping to ${arm9Entry} (ARM9) & ${arm11Entry} (ARM11)`,
         t0
       )
     );
-    await stepWait(340, 550);
+    await wait(280);
     if (checkAbort()) return { outcome: 'aborted' };
 
-    // ==================== 3. LAUNCHING HORIZON OS (Kernel9/Kernel11, Process9, pm, sm, fs, pxi, NS) ====================
+    // ==================== 3. LAUNCHING HORIZON OS ====================
     callbacks.onPhaseChange('stage2');
-    const stage2Header = firm1Parsed.data;
+    fcram.lockOtpAndInitSysmodules(stage2Header.sysmodules ?? ['Process9', 'pm', 'sm', 'fs', 'pxi', 'NS', 'ErrDisp']);
     callbacks.onLog(
       makeLog(
         'STAGE2',
         'info',
-        `Kernel9 locking OTP memory & launching Process9; Kernel11 initializing core environment & spawning sysmodules`,
+        'Kernel9 locked OTP & launched Process9 · Kernel11 spawned pm, sm, fs, pxi in FCRAM',
         t0
       )
     );
@@ -365,20 +379,15 @@ export async function runBootSequence(
       return { outcome: 'stage2_config', header: stage2Header, partitionChecks: checks };
     }
 
-    await stepWait(380, 550);
+    await wait(300);
     if (checkAbort()) return { outcome: 'aborted' };
 
-    callbacks.onLog(
-      makeLog('STAGE2', 'info', 'Process Manager (pm) started sm, fs, and pxi (IPC) · Process9 initialized Keyslots 0x16, 0x25, 0x3D', t0)
-    );
-
-    // Mount TWL_SYSDATA (nand:/sys/) via Process9 + fs (AES-128-CTR Keyslot 0x16)
-    callbacks.onStage2Mount?.('nand:/sys/', 'mounting', 'Process9 decrypting nand:/sys/ (Keyslot 0x16)');
-    const sysCiphertext = await nandDriver.readPartition('twl_sysdata', options.slowStep ? 18 : 0);
+    // Mount TWL_SYSDATA into FCRAM cache
+    const sysCiphertext = await nandDriver.readPartition('twl_sysdata');
     if (checkAbort()) return { outcome: 'aborted' };
     const sysActualHash = await computeSHA256Hex(sysCiphertext);
-    if (sysActualHash !== ncsdParsed.records['twl_sysdata']?.sha256) {
-      callbacks.onStage2Mount?.('nand:/sys/', 'error', 'SHA-256 mismatch against NCSD_HDR');
+    const sysExpectedHash = ncsdParsed.records['twl_sysdata']?.sha256 ?? '';
+    if (sysActualHash !== sysExpectedHash) {
       callbacks.onLog(makeLog('STAGE2', 'error', 'TWL_SYSDATA ciphertext hash mismatch', t0));
       callbacks.onPhaseChange('panic');
       callbacks.onPanic({
@@ -387,17 +396,15 @@ export async function runBootSequence(
         errorCode: '0xD9004587',
         title: 'HORIZON OS FS PANIC: TWL_SYSDATA Corrupt',
         detail: 'Ciphertext integrity check failed on nand:/sys/config.bin before decryption.',
-        expectedHash: ncsdParsed.records['twl_sysdata']?.sha256,
+        expectedHash: sysExpectedHash,
         actualHash: sysActualHash,
       });
       return { outcome: 'panic' };
     }
 
-    // REAL AES-128-CTR DECRYPTION: Process9 decrypts TWL_SYSDATA
     const sysPlaintext = await decryptPartition('twl_sysdata', sysCiphertext);
     const sysParsed = parseSysDataPartition(sysPlaintext);
     if (!sysParsed.ok) {
-      callbacks.onStage2Mount?.('nand:/sys/', 'error', sysParsed.reason);
       callbacks.onLog(makeLog('STAGE2', 'error', `Decrypted TWL_SYSDATA invalid: ${sysParsed.reason}`, t0));
       callbacks.onPhaseChange('panic');
       callbacks.onPanic({
@@ -409,17 +416,32 @@ export async function runBootSequence(
       });
       return { outcome: 'panic' };
     }
-    callbacks.onStage2Mount?.('nand:/sys/', 'ok', `Owner: ${sysParsed.data.ownerName} · Theme: ${sysParsed.data.themeId}`);
-    callbacks.onLog(makeLog('STAGE2', 'ok', `Decrypted & mounted nand:/sys/ (Owner: ${sysParsed.data.ownerName})`, t0));
-    await stepWait(300, 500);
+    verifiedChecks.twl_sysdata = {
+      id: 'twl_sysdata',
+      valid: true,
+      magicFound: sysParsed.magic,
+      expectedMagic: 'CFG0',
+      actualHash: sysActualHash,
+      expectedHash: sysExpectedHash,
+    };
+    fcram.writeSystemConfigCache(sysParsed.data);
+    const id0Short = sysParsed.data.identity?.id0.slice(0, 10) ?? '0000000000';
+    callbacks.onLog(
+      makeLog(
+        'STAGE2',
+        'ok',
+        `Mounted /rw/sys/SecureInfo_A (${sysParsed.data.region}) & /private/movable.sed (ID0: ${id0Short}...)`,
+        t0
+      )
+    );
+    await wait(240);
 
-    // Mount CTRNAND_SYS (ctrnand:/title/) via Process9 + fs (AES-128-CTR Keyslot 0x25)
-    callbacks.onStage2Mount?.('ctrnand:/title/', 'mounting', 'Process9 decrypting ctrnand:/title/ (Keyslot 0x25)');
-    const ctrCiphertext = await nandDriver.readPartition('ctrnand_sys', options.slowStep ? 10 : 0);
+    // Mount CTRNAND_SYS into FCRAM cache
+    const ctrCiphertext = await nandDriver.readPartition('ctrnand_sys');
     if (checkAbort()) return { outcome: 'aborted' };
     const ctrActualHash = await computeSHA256Hex(ctrCiphertext);
-    if (ctrActualHash !== ncsdParsed.records['ctrnand_sys']?.sha256) {
-      callbacks.onStage2Mount?.('ctrnand:/title/', 'error', 'SHA-256 mismatch against NCSD_HDR');
+    const ctrExpectedHash = ncsdParsed.records['ctrnand_sys']?.sha256 ?? '';
+    if (ctrActualHash !== ctrExpectedHash) {
       callbacks.onLog(makeLog('STAGE2', 'error', 'CTRNAND_SYS ciphertext hash mismatch', t0));
       callbacks.onPhaseChange('panic');
       callbacks.onPanic({
@@ -428,17 +450,15 @@ export async function runBootSequence(
         errorCode: '0xD900458B',
         title: 'HORIZON OS FS PANIC: CTRNAND_SYS Corrupt',
         detail: 'Ciphertext integrity check failed on CTRNAND partition before decryption.',
-        expectedHash: ncsdParsed.records['ctrnand_sys']?.sha256,
+        expectedHash: ctrExpectedHash,
         actualHash: ctrActualHash,
       });
       return { outcome: 'panic' };
     }
 
-    // REAL AES-128-CTR DECRYPTION: Process9 decrypts CTRNAND
     const ctrPlaintext = await decryptPartition('ctrnand_sys', ctrCiphertext);
     const ctrParsed = parseCtrNandPartition(ctrPlaintext);
     if (!ctrParsed.ok) {
-      callbacks.onStage2Mount?.('ctrnand:/title/', 'error', ctrParsed.reason);
       callbacks.onLog(makeLog('STAGE2', 'error', `Decrypted CTRNAND invalid: ${ctrParsed.reason}`, t0));
       callbacks.onPhaseChange('panic');
       callbacks.onPanic({
@@ -450,23 +470,31 @@ export async function runBootSequence(
       });
       return { outcome: 'panic' };
     }
-    callbacks.onStage2Mount?.(
-      'ctrnand:/title/',
-      'ok',
-      `${ctrParsed.data.titles.length} titles decrypted · HOME ${ctrParsed.data.homeMenuTitleId}`
-    );
+    verifiedChecks.ctrnand_sys = {
+      id: 'ctrnand_sys',
+      valid: true,
+      magicFound: ctrParsed.magic,
+      expectedMagic: 'CND0',
+      actualHash: ctrActualHash,
+      expectedHash: ctrExpectedHash,
+    };
+    fcram.writeCtrNandCache(ctrParsed.data);
     callbacks.onLog(
-      makeLog('STAGE2', 'ok', `Decrypted & mounted ctrnand:/title/ (${ctrParsed.data.titles.length} applets + HOME)`, t0)
+      makeLog(
+        'STAGE2',
+        'ok',
+        `Mounted ctrnand:/title/ (${ctrParsed.data.packages.length} pkgs) & /dbs/ (title.db: ${ctrParsed.data.dbs.titleDb.length}, ticket.db: ${ctrParsed.data.dbs.ticketDb.length}, import.db: ${ctrParsed.data.dbs.importDb.length})`,
+        t0
+      )
     );
-    await stepWait(300, 500);
+    await wait(240);
 
-    // Mount NAND_USERDATA (nand:/data/) via Process9 + fs (AES-128-CTR Keyslot 0x3D)
-    callbacks.onStage2Mount?.('nand:/data/', 'mounting', 'Process9 decrypting nand:/data/ (Keyslot 0x3D)');
-    const usrCiphertext = await nandDriver.readPartition('nand_userdata', options.slowStep ? 8 : 0);
+    // Mount NAND_USERDATA into FCRAM cache
+    const usrCiphertext = await nandDriver.readPartition('nand_userdata');
     if (checkAbort()) return { outcome: 'aborted' };
     const usrActualHash = await computeSHA256Hex(usrCiphertext);
-    if (usrActualHash !== ncsdParsed.records['nand_userdata']?.sha256) {
-      callbacks.onStage2Mount?.('nand:/data/', 'error', 'SHA-256 mismatch against NCSD_HDR');
+    const usrExpectedHash = ncsdParsed.records['nand_userdata']?.sha256 ?? '';
+    if (usrActualHash !== usrExpectedHash) {
       callbacks.onLog(makeLog('STAGE2', 'error', 'NAND_USERDATA ciphertext hash mismatch', t0));
       callbacks.onPhaseChange('panic');
       callbacks.onPanic({
@@ -475,17 +503,15 @@ export async function runBootSequence(
         errorCode: '0xC8A04471',
         title: 'HORIZON OS FS PANIC: NAND_USERDATA Save Corrupt',
         detail: 'Ciphertext integrity check failed on user save partition before decryption.',
-        expectedHash: ncsdParsed.records['nand_userdata']?.sha256,
+        expectedHash: usrExpectedHash,
         actualHash: usrActualHash,
       });
       return { outcome: 'panic' };
     }
 
-    // REAL AES-128-CTR DECRYPTION: Process9 decrypts NAND_USERDATA
     const usrPlaintext = await decryptPartition('nand_userdata', usrCiphertext);
     const usrParsed = parseUserDataPartition(usrPlaintext);
     if (!usrParsed.ok) {
-      callbacks.onStage2Mount?.('nand:/data/', 'error', usrParsed.reason);
       callbacks.onLog(makeLog('STAGE2', 'error', `Decrypted NAND_USERDATA invalid: ${usrParsed.reason}`, t0));
       callbacks.onPhaseChange('panic');
       callbacks.onPanic({
@@ -497,33 +523,36 @@ export async function runBootSequence(
       });
       return { outcome: 'panic' };
     }
-    callbacks.onStage2Mount?.(
-      'nand:/data/',
-      'ok',
-      `${usrParsed.data.notes.length} notes · ${usrParsed.data.miis.length} Miis · Grid OK`
-    );
-    callbacks.onLog(makeLog('STAGE2', 'ok', 'Decrypted & mounted nand:/data/ (User saves & folders)', t0));
-    await stepWait(300, 500);
+    verifiedChecks.nand_userdata = {
+      id: 'nand_userdata',
+      valid: true,
+      magicFound: usrParsed.magic,
+      expectedMagic: 'USR0',
+      actualHash: usrActualHash,
+      expectedHash: usrExpectedHash,
+    };
+    fcram.writeUserDataCache(usrParsed.data);
+    callbacks.onLog(makeLog('STAGE2', 'ok', 'Decrypted & cached nand:/data/ in FCRAM (User saves & folders)', t0));
+    await wait(220);
 
-    // pm launches NS module -> initializes ErrDisp & LCD display driver
+    // pm launches NS -> initializes ErrDisp & LCDs
     callbacks.onLog(
       makeLog(
         'KERNEL',
         'info',
-        `pm launched NS (Nintendo Shell) · Initializing ErrDisp & Top/Bottom LCDs -> Autoboot ${ctrParsed.data.homeMenuTitleId}`,
+        `pm launched NS · Initializing ErrDisp & Top/Bottom LCDs -> Autoboot ${ctrParsed.data.homeMenuTitleId}`,
         t0
       )
     );
 
-    // Increment boot counter & encrypt back to TWL_SYSDATA (Keyslot 0x16)
     const updatedConfig = {
       ...sysParsed.data,
       bootCount: sysParsed.data.bootCount + 1,
     };
+    fcram.writeSystemConfigCache(updatedConfig);
     await nandDriver.saveSystemConfig(updatedConfig);
 
-    const finalChecks = await auditAllPartitions();
-    await stepWait(500, 750);
+    await wait(380);
     if (checkAbort()) return { outcome: 'aborted' };
 
     callbacks.onPhaseChange('home_menu');
@@ -535,11 +564,12 @@ export async function runBootSequence(
       outcome: 'home_menu',
       state: {
         config: updatedConfig,
-        titles: ctrParsed.data.titles,
-        userData: usrParsed.data,
-        stage1Opcodes: opcodes,
+        titles: fcram.readTitlesCache() ?? ctrParsed.data.titles,
+        ctrNand: fcram.readCtrNandCache() ?? ctrParsed.data,
+        userData: fcram.readUserDataCache() ?? usrParsed.data,
+        stage1Opcodes: cachedOpcodes,
         stage2Header,
-        partitionChecks: finalChecks,
+        partitionChecks: verifiedChecks,
       },
     };
   } catch (err) {

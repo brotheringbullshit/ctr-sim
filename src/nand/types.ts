@@ -1,6 +1,5 @@
 export const CHUNK_SIZE = 16384; // 16 KB per IDB chunk
 export const TOTAL_CHUNKS = 256; // 256 chunks = 4.00 MB Virtual NAND
-export const TOTAL_NAND_BYTES = CHUNK_SIZE * TOTAL_CHUNKS;
 
 export type PartitionId =
   | 'ncsd_hdr'
@@ -14,6 +13,8 @@ export interface PartitionSpec {
   id: PartitionId;
   name: string;
   label: string;
+  filesystem: 'Raw Binary' | 'FAT16';
+  logicalPartition: string;
   mountPoint: string;
   startChunk: number;
   endChunk: number; // inclusive
@@ -28,72 +29,84 @@ export const NAND_PARTITIONS: PartitionSpec[] = [
     id: 'ncsd_hdr',
     name: 'NCSD_HDR',
     label: 'NCSD Master Header',
+    filesystem: 'Raw Binary',
+    logicalPartition: 'NCSD / FIRM0',
     mountPoint: 'raw:/0x000000',
     startChunk: 0,
     endChunk: 0,
     magic: 'NCSD',
-    color: '#6366f1', // indigo
+    color: '#6366f1',
     description: 'RSA-2048 signature block, partition table, NAND geometry, and SHA-256 digests for Boot9.',
     requiredBy: 'Boot9 / Boot11 (Stage 0)',
   },
   {
     id: 'firm0_boot1',
     name: 'FIRM0_BOOT1',
-    label: 'FIRM Header & Loader',
+    label: 'FIRM0 Core Kernel',
+    filesystem: 'Raw Binary',
+    logicalPartition: 'FIRM0',
     mountPoint: 'firm0:/',
     startChunk: 1,
     endChunk: 15,
     magic: 'FIRM',
-    color: '#0284c7', // sky
-    description: 'Signed FIRM header, ARM9/ARM11 entrypoints, BootROM lockout vectors, and section loader.',
+    color: '#0284c7',
+    description: 'Stores core NATIVE_FIRM ARM9/ARM11 kernel entrypoints and BootROM lockout section loader.',
     requiredBy: 'Boot9 -> FIRM Validation',
   },
   {
     id: 'firm1_stage2',
     name: 'FIRM1_STAGE2',
-    label: 'Horizon OS FIRM Sections',
+    label: 'FIRM1 Backup Kernel',
+    filesystem: 'Raw Binary',
+    logicalPartition: 'FIRM1',
     mountPoint: 'firm1:/',
     startChunk: 16,
     endChunk: 47,
     magic: 'STG2',
-    color: '#0d9488', // teal
-    description: 'Kernel9 (OTP lock + Process9), Kernel11, pm/sm/fs/pxi services, and NS (ErrDisp) shell.',
+    color: '#0d9488',
+    description: 'Backup NATIVE_FIRM, Kernel9 (OTP lock + Process9), Kernel11 sysmodules, and NS shell.',
     requiredBy: 'FIRM Entry -> Horizon OS',
   },
   {
     id: 'twl_sysdata',
     name: 'TWL_SYSDATA',
-    label: 'System Config & Keys',
-    mountPoint: 'nand:/sys/',
+    label: 'TWLN / TWLP & RW Identity',
+    filesystem: 'FAT16',
+    logicalPartition: 'TWLN / TWLP',
+    mountPoint: 'nand:/rw/sys/',
     startChunk: 48,
     endChunk: 79,
     magic: 'CFG0',
-    color: '#d97706', // amber
-    description: 'Owner profile, active theme, grid zoom, brightness, Play Coins, and Wi-Fi.',
+    color: '#d97706',
+    description: 'TWLN/TWLP DS compatibility config, SecureInfo_A, LocalFriendCodeSeed_B, and movable.sed.',
     requiredBy: 'Stage 2 & HOME Menu',
   },
   {
     id: 'ctrnand_sys',
     name: 'CTRNAND_SYS',
-    label: 'CTRNAND System Applets',
-    mountPoint: 'ctrnand:/title/',
+    label: 'CTRNAND OS & Databases',
+    filesystem: 'FAT16',
+    logicalPartition: 'CTRNAND',
+    mountPoint: 'ctrnand:/',
     startChunk: 80,
     endChunk: 159,
     magic: 'CND0',
-    color: '#059669', // emerald
-    description: 'HOME Menu binary manifest, system applets, icon palettes, and audio chimes.',
+    color: '#059669',
+    description: 'Primary CTRNAND partition: /title/ (.tmd + .app NCCH), /dbs/ (ticket.db, certs.db, title.db, import.db).',
     requiredBy: 'Stage 2 & HOME Menu',
   },
   {
     id: 'nand_userdata',
     name: 'NAND_USERDATA',
-    label: 'User Saves & Layout',
+    label: 'CTRNAND Data & AGBSAVE',
+    filesystem: 'FAT16',
+    logicalPartition: 'CTRNAND /data/<ID0> & AGBSAVE',
     mountPoint: 'nand:/data/',
     startChunk: 160,
     endChunk: 255,
     magic: 'USR0',
-    color: '#e11d48', // rose
-    description: 'HOME grid icon ordering, folders, Game Notes drawings, Activity Log, Mii roster.',
+    color: '#e11d48',
+    description: '/data/<ID0>/ sysdata/extdata, HOME Menu layout, Mii DB, Game Notes, and AGBSAVE VC scratchpad.',
     requiredBy: 'HOME Menu & Applets',
   },
 ];
@@ -101,6 +114,15 @@ export const NAND_PARTITIONS: PartitionSpec[] = [
 export type ConsoleThemeId = 'classic-white' | 'dark-charcoal' | 'cobalt-blue' | 'famicom-red' | 'mint-cream';
 
 export type SupportedLanguage = 'en' | 'es' | 'fr' | 'de' | 'it' | 'ja' | 'pt';
+
+export interface ConsoleIdentityFiles {
+  id0: string; // 32-char hex derived from /private/movable.sed
+  id1: string; // 32-char hex SD subdirectory under Nintendo 3DS/<ID0>/
+  movableSedKeyHex: string; // 32-char hex KeyY in /private/movable.sed
+  secureInfoRegionByte: 'USA' | 'EUR' | 'JPN'; // /rw/sys/SecureInfo_A
+  secureInfoSerial: string;
+  localFriendCodeSeedHex: string; // /rw/sys/LocalFriendCodeSeed_B
+}
 
 export interface SystemConfig {
   ownerName: string;
@@ -116,8 +138,7 @@ export interface SystemConfig {
   playCoins: number;
   totalSteps: number;
   bootCount: number;
-  autobootHome: boolean;
-  showSplashBanner: boolean;
+  identity?: ConsoleIdentityFiles;
 }
 
 export type AppletId =
@@ -128,9 +149,141 @@ export type AppletId =
   | 'activity-log'
   | 'sound-studio'
   | 'game-notes'
-  | 'nand-tool'
   | 'browser'
   | 'camera-ar';
+
+export type TitleCategoryHigh =
+  | '00040000' // Standard / Retail / eShop Title
+  | '0004000E' // Game Update / Patch
+  | '00040010' // System Application
+  | '00040030' // System Applet
+  | '0004009B' // System Data Archive
+  | '00048004'; // DSiWare (TWLN)
+
+export interface NcchExeFsInfo {
+  codeSizeBytes: number;
+  iconSizeBytes: number;
+  bannerSizeBytes: number;
+  hash: string;
+}
+
+export interface NcchRomFsInfo {
+  sizeBytes: number;
+  levelCount: number;
+  hash: string;
+}
+
+export interface NcchAppFile {
+  fileName: string; // e.g. '00000000.app'
+  magic: 'NCCH';
+  partitionId: string;
+  programId: string;
+  productCode: string;
+  makerCode: string;
+  contentIndex: number;
+  totalSizeBytes: number;
+  cryptoType: 'CTR-NAND-Unencrypted' | 'NCCH-FixedKey' | 'SD-MovableSed-AES';
+  exefs?: NcchExeFsInfo;
+  romfs?: NcchRomFsInfo;
+}
+
+export interface TmdContentRecord {
+  contentId: string; // 8-char hex e.g. '00000001'
+  index: number;
+  type: 'MainContent' | 'Manual' | 'SystemData';
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface TitleMetadataTmd {
+  fileName: string; // e.g. '00000001.tmd'
+  titleId: string; // 16-char hex
+  titleVersion: number;
+  versionString: string;
+  titleType: TitleCategoryHigh;
+  saveDataSizeBytes: number;
+  sysVersion: string;
+  contentCount: number;
+  contents: TmdContentRecord[];
+  signatureIssuer: string; // 'Root-CA00000003-CP0000000b'
+  signatureHex: string;
+}
+
+export interface TitleTicket {
+  ticketId: string; // 16-char hex
+  titleId: string; // 16-char hex
+  titleIdHigh: TitleCategoryHigh;
+  titleIdLow: string; // 8-char hex
+  consoleId: string;
+  encryptedTitleKeyHex: string; // 32-char hex
+  commonKeyIndex: number;
+  version: number;
+  issuer: string; // 'Root-CA00000003-XS0000000c'
+  source: 'NintendoSigned' | 'SystemPreinstalled' | 'LocalHomebrew';
+  signatureHex: string;
+  rightsMask: string;
+}
+
+export interface TitleDatabaseEntry {
+  titleId: string;
+  titleIdHigh: TitleCategoryHigh;
+  titleIdLow: string;
+  name: string;
+  productCode: string;
+  version: string;
+  titleVersion: number;
+  mediaType: 'NAND' | 'SD' | 'GAMECARD' | 'TWLN';
+  installPath: string;
+  tmdFile: string;
+  appFiles: string[];
+  sizeBytes: number;
+  blocks: number;
+  state: 'Active' | 'StagedImport';
+  launchableAppletId?: AppletId;
+}
+
+export interface TitlePackage {
+  titleId: string;
+  titleIdHigh: TitleCategoryHigh;
+  titleIdLow: string;
+  productCode: string;
+  publisher: string;
+  shortName: string;
+  fullName: string;
+  mediaType: 'NAND' | 'SD' | 'GAMECARD' | 'TWLN';
+  basePath: string; // '/title/<TID_High>/<TID_Low>/content/'
+  tmd: TitleMetadataTmd;
+  apps: NcchAppFile[];
+  appletId?: AppletId;
+  blocks: number;
+  description: string;
+}
+
+export interface CertChainEntry {
+  name: string;
+  issuer: string;
+  keyType: 'RSA-4096' | 'RSA-2048';
+  fingerprintSha256: string;
+}
+
+export interface CtrNandArchiveData {
+  homeMenuTitleId: string;
+  sharedFontHash: string;
+  titles: SystemTitleEntry[];
+  packages: TitlePackage[];
+  dbs: {
+    titleDb: TitleDatabaseEntry[];
+    importDb: TitleDatabaseEntry[];
+    ticketDb: TitleTicket[];
+    certsDb: CertChainEntry[];
+  };
+  nandFsMeta: {
+    ctrnandDirs: string[];
+    twlnDirs: string[];
+    twlpDirs: string[];
+    agbsaveMagic: string;
+  };
+}
 
 export interface SystemTitleEntry {
   titleId: string;
@@ -196,6 +349,8 @@ export interface UserSaveData {
   miis: MiiProfile[];
   synthPattern: number[]; // 8-step note indices
   cartridgeHighScore: number;
+  sysdataArchives?: string[];
+  extdataArchives?: string[];
 }
 
 export interface Stage1Opcode {
@@ -250,15 +405,12 @@ export interface ChunkIOEvent {
   op: 'read' | 'write' | 'corrupt';
   partitionId: PartitionId;
   timestamp: number;
-  byteOffset?: number;
-  byteLength?: number;
-  keyslot?: string;
-  details?: string;
 }
 
 export interface LoadedSystemState {
   config: SystemConfig;
   titles: SystemTitleEntry[];
+  ctrNand: CtrNandArchiveData;
   userData: UserSaveData;
   stage1Opcodes: Stage1Opcode[];
   stage2Header: BootStage2Header;

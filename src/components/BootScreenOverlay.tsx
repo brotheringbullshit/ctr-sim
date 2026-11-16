@@ -5,7 +5,6 @@ import {
   NAND_PARTITIONS,
   PartitionId,
   PartitionIntegrity,
-  Stage1Opcode,
 } from '../nand/types';
 
 export interface PanicInfo {
@@ -21,23 +20,16 @@ export interface PanicInfo {
 interface BootScreenProps {
   screen: 'top' | 'bottom';
   phase: BootPhase;
-  provisionProgress: { written: number; total: number; label: string };
-  stage1Step: { index: number; opcodes: Stage1Opcode[] };
-  stage2Mounts: Array<{ mount: string; status: 'mounting' | 'ok' | 'error'; detail: string }>;
   panicInfo: PanicInfo | null;
   stage2ConfigHeader: BootStage2Header | null;
   partitionChecks: Record<PartitionId, PartitionIntegrity> | null;
   onRepairPartition: (id: PartitionId) => void;
   onReboot: (hold?: 'NONE' | 'SELECT' | 'START') => void;
-  onToggleStage2Flag: (flag: 'autobootHome' | 'showSplashBanner') => void;
 }
 
 export const BootScreenOverlay: React.FC<BootScreenProps> = ({
   screen,
   phase,
-  provisionProgress,
-  stage1Step,
-  stage2Mounts,
   panicInfo,
   stage2ConfigHeader,
   partitionChecks,

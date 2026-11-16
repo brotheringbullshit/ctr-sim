@@ -69,14 +69,6 @@ export async function computeSHA256Hex(data: Uint8Array): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-export function toHexByte(byte: number): string {
-  return byte.toString(16).padStart(2, '0').toUpperCase();
-}
-
-export function toHex32(val: number): string {
-  return '0x' + (val >>> 0).toString(16).padStart(8, '0').toUpperCase();
-}
-
 /* ==================== 3DS AES-128-CTR HARDWARE KEYSLOTS ==================== */
 
 export interface KeyslotInfo {

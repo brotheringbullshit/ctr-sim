@@ -25,6 +25,8 @@ interface TopScreenBannerProps {
   titlesByApplet: Record<string, SystemTitleEntry>;
   folders: Record<string, HomeFolder>;
   cartridgeInserted: boolean;
+  cartridgeTicketValid?: boolean;
+  cartridgeUpdateVersion?: string | null;
   depth3D: number; // 0 to 1
   suspendedApplet: AppletId | null;
 }
@@ -36,11 +38,12 @@ export const TopScreenBanner: React.FC<TopScreenBannerProps> = ({
   titlesByApplet,
   folders,
   cartridgeInserted,
+  cartridgeTicketValid = true,
+  cartridgeUpdateVersion = null,
   depth3D,
   suspendedApplet,
 }) => {
   const [now, setNow] = useState(() => new Date());
-  const [tileDrift, setTileDrift] = useState(0);
   const [audioBlocked, setAudioBlocked] = useState(() => soundEngine.isAutoplayBlocked);
 
   useEffect(() => {
@@ -50,17 +53,6 @@ export const TopScreenBanner: React.FC<TopScreenBannerProps> = ({
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 15000);
     return () => clearInterval(t);
-  }, []);
-
-  useEffect(() => {
-    let raf = 0;
-    const start = performance.now();
-    const loop = (ts: number) => {
-      setTileDrift((((ts - start) / 1000) * 14) % 44);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
   }, []);
 
   const theme = HOME_THEMES[config.themeId] ?? HOME_THEMES['classic-white'];
@@ -88,12 +80,19 @@ export const TopScreenBanner: React.FC<TopScreenBannerProps> = ({
     if (appletId === 'cartridge' && !cartridgeInserted) {
       bannerKind = 'empty-cartridge';
       captionLabel = t.noCartridge;
+    } else if (appletId === 'cartridge' && !cartridgeTicketValid) {
+      bannerKind = 'empty-cartridge';
+      captionLabel = 'No Ticket (.tik) in ticket.db';
     } else {
       bannerKind = appletId;
-      captionLabel =
+      const baseTitle =
         getLocalizedTitle(appletId, config.language).fullName ||
         titlesByApplet[appletId]?.fullName ||
         null;
+      captionLabel =
+        baseTitle && appletId === 'cartridge' && cartridgeUpdateVersion
+          ? `${baseTitle} (${cartridgeUpdateVersion})`
+          : baseTitle;
     }
   }
 
@@ -103,12 +102,7 @@ export const TopScreenBanner: React.FC<TopScreenBannerProps> = ({
       style={{ background: theme.topBg }}
     >
       {/* Authentic 3DS Scrolling Rounded-Square Tile Backdrop */}
-      <div
-        className="absolute -inset-12 pointer-events-none grid grid-cols-8 gap-2.5 opacity-60"
-        style={{
-          transform: `translate3d(${-tileDrift}px, 0, 0)`,
-        }}
-      >
+      <div className="absolute -inset-12 pointer-events-none grid grid-cols-8 gap-2.5 opacity-60 ctr-tile-drift">
         {Array.from({ length: 48 }).map((_, i) => (
           <div
             key={i}

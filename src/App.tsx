@@ -4,12 +4,11 @@ import {
   BootPhase,
   BootStage2Header,
   ConsoleThemeId,
+  CtrNandArchiveData,
   HomeFolder,
   LoadedSystemState,
-  NAND_PARTITIONS,
   PartitionId,
   PartitionIntegrity,
-  Stage1Opcode,
   SystemConfig,
   SystemTitleEntry,
   UserSaveData,
@@ -17,11 +16,11 @@ import {
 import { nandDriver } from './nand/idbStorage';
 import { auditAllPartitions, runBootSequence } from './bootloader/engine';
 import { soundEngine } from './audio/soundEngine';
+import { fcram } from './ram/fcram';
 import { ConsoleShell } from './components/ConsoleShell';
 import { BootScreenOverlay, PanicInfo } from './components/BootScreenOverlay';
 import { TopScreenBanner } from './components/TopScreenBanner';
 import { HomeMenuGrid } from './components/HomeMenuGrid';
-import { HexInspectorModal } from './components/HexInspectorModal';
 import { SystemSettingsApplet } from './components/applets/SystemSettingsApplet';
 import { GameNotesApplet } from './components/applets/GameNotesApplet';
 import { ActivityLogApplet } from './components/applets/ActivityLogApplet';
@@ -33,7 +32,6 @@ import {
 } from './components/applets/CartridgeGameApplet';
 import {
   MiiMakerApplet,
-  NandToolApplet,
   SimpleInfoApplet,
 } from './components/applets/MiscApplets';
 
@@ -47,14 +45,6 @@ const THEME_CYCLE: ConsoleThemeId[] = [
 
 export default function App() {
   const [phase, setPhase] = useState<BootPhase>('bootrom');
-  const [provisionProgress, setProvisionProgress] = useState({ written: 0, total: 256, label: '' });
-  const [stage1Step, setStage1Step] = useState<{ index: number; opcodes: Stage1Opcode[] }>({
-    index: 0,
-    opcodes: [],
-  });
-  const [stage2Mounts, setStage2Mounts] = useState<
-    Array<{ mount: string; status: 'mounting' | 'ok' | 'error'; detail: string }>
-  >([]);
   const [panicInfo, setPanicInfo] = useState<PanicInfo | null>(null);
   const [stage2ConfigHeader, setStage2ConfigHeader] = useState<BootStage2Header | null>(null);
   const [partitionChecks, setPartitionChecks] = useState<Record<PartitionId, PartitionIntegrity> | null>(null);
@@ -69,19 +59,21 @@ export default function App() {
   const [depth3D, setDepth3D] = useState(0.35);
   const [nandBusy, setNandBusy] = useState(false);
   const [heldBootKey, setHeldBootKey] = useState<'NONE' | 'SELECT' | 'START'>('NONE');
-  const [hexChunkModal, setHexChunkModal] = useState<number | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const busyTimerRef = useRef<number | null>(null);
 
-  // Subscribe to real-time IndexedDB chunk I/O telemetry for the console NAND LED
+  // Subscribe to IndexedDB chunk I/O pulses for the physical NAND LED
   useEffect(() => {
     const unsub = nandDriver.subscribeIO(() => {
       setNandBusy(true);
       if (busyTimerRef.current) window.clearTimeout(busyTimerRef.current);
       busyTimerRef.current = window.setTimeout(() => setNandBusy(false), 180);
     });
-    return unsub;
+    return () => {
+      unsub();
+      if (busyTimerRef.current) window.clearTimeout(busyTimerRef.current);
+    };
   }, []);
 
   const refreshAudit = useCallback(async () => {
@@ -103,7 +95,6 @@ export default function App() {
       setActiveApplet(null);
       setOpenFolderId(null);
       setSelectedIndex(0);
-      setStage2Mounts([]);
       setSystemState(null);
 
       const res = await runBootSequence(
@@ -125,23 +116,12 @@ export default function App() {
               'color: #f1f5f9; font-family: monospace;'
             );
           },
-          onProvisionProgress: (written, total, label) =>
-            setProvisionProgress({ written, total, label }),
-          onStage1Step: (index, opcodes) => setStage1Step({ index, opcodes }),
-          onStage2Mount: (mount, status, detail) =>
-            setStage2Mounts((prev) => {
-              const idx = prev.findIndex((m) => m.mount === mount);
-              if (idx === -1) return [...prev, { mount, status, detail }];
-              const copy = [...prev];
-              copy[idx] = { mount, status, detail };
-              return copy;
-            }),
           onPanic: (info) => {
             setPanicInfo(info);
             void refreshAudit();
           },
         },
-        { slowStep: false, holdKey, abortSignal: ctrl.signal }
+        { holdKey, abortSignal: ctrl.signal }
       );
 
       if (res.outcome === 'home_menu') {
@@ -176,16 +156,43 @@ export default function App() {
 
   const handleUpdateConfig = useCallback(async (nextConfig: SystemConfig) => {
     soundEngine.enabled = nextConfig.soundEnabled;
+    fcram.writeSystemConfigCache(nextConfig);
     setSystemState((prev) => (prev ? { ...prev, config: nextConfig } : prev));
     await nandDriver.saveSystemConfig(nextConfig);
-    await refreshAudit();
-  }, [refreshAudit]);
+  }, []);
 
   const handleUpdateUserData = useCallback(async (nextUser: UserSaveData) => {
+    fcram.writeUserDataCache(nextUser);
     setSystemState((prev) => (prev ? { ...prev, userData: nextUser } : prev));
     await nandDriver.saveUserData(nextUser);
-    await refreshAudit();
-  }, [refreshAudit]);
+  }, []);
+
+  const handleUpdateCtrNand = useCallback(async (nextCtr: CtrNandArchiveData) => {
+    fcram.writeCtrNandCache(nextCtr);
+    setSystemState((prev) =>
+      prev ? { ...prev, ctrNand: nextCtr, titles: nextCtr.titles } : prev
+    );
+    await nandDriver.saveCtrNandArchive(nextCtr);
+  }, []);
+
+  const cartridgeTicketValid = useMemo(() => {
+    if (!systemState) return true;
+    return systemState.ctrNand.dbs.ticketDb.some(
+      (tk) => tk.titleId === '0004000000030800'
+    );
+  }, [systemState]);
+
+  const cartridgeUpdateVersion = useMemo(() => {
+    if (!systemState) return null;
+    const updEntry = systemState.ctrNand.dbs.titleDb.find(
+      (e) => e.titleId === '0004000E00030800' && e.state === 'Active'
+    );
+    const updTicket = systemState.ctrNand.dbs.ticketDb.some(
+      (tk) => tk.titleId === '0004000E00030800'
+    );
+    if (!updEntry || !updTicket) return null;
+    return updEntry.version;
+  }, [systemState]);
 
   // Play each application's distinct banner jingle when selected on the HOME Menu
   const firstBootDoneRef = useRef(false);
@@ -204,7 +211,7 @@ export default function App() {
       : systemState.userData.slots;
     const item = items[selectedIndex];
     if (item?.type === 'app') {
-      if (item.appletId === 'cartridge' && !cartridgeInserted) {
+      if (item.appletId === 'cartridge' && (!cartridgeInserted || !cartridgeTicketValid)) {
         soundEngine.stopBannerJingle();
         return;
       }
@@ -212,21 +219,35 @@ export default function App() {
     } else {
       soundEngine.stopBannerJingle();
     }
-  }, [phase, activeApplet, systemState, openFolderId, selectedIndex, cartridgeInserted]);
+  }, [phase, activeApplet, systemState, openFolderId, selectedIndex, cartridgeInserted, cartridgeTicketValid]);
 
   const handleLaunchApplet = useCallback(
     async (appletId: AppletId) => {
       if (!systemState) return;
       soundEngine.stopBannerJingle();
-      const title = titlesByApplet[appletId];
-      if (title) soundEngine.playConfirm();
+
+      // Verify Title ID registration in title.db, .tmd + NCCH .app files, and .tik license in ticket.db
+      const titleEntry = titlesByApplet[appletId];
+      if (titleEntry) {
+        const launchCheck = fcram.verifyTitleLaunch(titleEntry.titleId);
+        if (!launchCheck.ok) {
+          soundEngine.playError();
+          console.warn(`[HORIZON NS] Launch blocked for ${titleEntry.titleId}: ${launchCheck.reason}`);
+          return;
+        }
+        soundEngine.playConfirm();
+      }
+
+      // Allocate simulated APPMEM heap inside 128 MB FCRAM
+      fcram.allocateApplet(appletId);
       setActiveApplet(appletId);
       setAppletLaunchTime(Date.now());
 
-      // Record launch in NAND_USERDATA activity log
-      const existing = systemState.userData.activity[appletId];
+      // Read latest userData from resident FCRAM cache to avoid stale closures
+      const currentUserData = fcram.readUserDataCache() ?? systemState.userData;
+      const existing = currentUserData.activity[appletId];
       const nextActivity = {
-        ...systemState.userData.activity,
+        ...currentUserData.activity,
         [appletId]: {
           appletId,
           launchCount: (existing?.launchCount ?? 0) + 1,
@@ -234,7 +255,7 @@ export default function App() {
           lastPlayed: new Date().toISOString().slice(0, 10),
         },
       };
-      await handleUpdateUserData({ ...systemState.userData, activity: nextActivity });
+      await handleUpdateUserData({ ...currentUserData, activity: nextActivity });
     },
     [systemState, titlesByApplet, handleUpdateUserData]
   );
@@ -245,22 +266,27 @@ export default function App() {
       return;
     }
     soundEngine.playBack();
+    const exitingApplet = activeApplet;
     const elapsedSec = appletLaunchTime
       ? Math.max(1, Math.round((Date.now() - appletLaunchTime) / 1000))
       : 1;
-    const existing = systemState.userData.activity[activeApplet];
+
+    setActiveApplet(null);
+    setAppletLaunchTime(null);
+    fcram.freeApplet(exitingApplet);
+
+    const currentUserData = fcram.readUserDataCache() ?? systemState.userData;
+    const existing = currentUserData.activity[exitingApplet];
     if (existing) {
       const nextActivity = {
-        ...systemState.userData.activity,
-        [activeApplet]: {
+        ...currentUserData.activity,
+        [exitingApplet]: {
           ...existing,
           totalSeconds: existing.totalSeconds + elapsedSec,
         },
       };
-      await handleUpdateUserData({ ...systemState.userData, activity: nextActivity });
+      await handleUpdateUserData({ ...currentUserData, activity: nextActivity });
     }
-    setActiveApplet(null);
-    setAppletLaunchTime(null);
   }, [activeApplet, appletLaunchTime, systemState, handleUpdateUserData]);
 
   const handleRepairPartition = async (id: PartitionId) => {
@@ -274,31 +300,11 @@ export default function App() {
 
   const handleReflashAll = async () => {
     abortRef.current?.abort();
+    fcram.reset();
+    soundEngine.stopBannerJingle();
     setPhase('provisioning');
     setActiveApplet(null);
-    await nandDriver.provisionFreshNand((written, total, label) => {
-      setProvisionProgress({ written, total, label });
-    });
-    await startBoot('NONE');
-  };
-
-  const handleExportNandBin = async () => {
-    const bytes = await nandDriver.exportFullNandBin();
-    const copy = new Uint8Array(bytes.byteLength);
-    copy.set(bytes);
-    const blob = new Blob([copy.buffer], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `ctr-sim-nand-${new Date().toISOString().slice(0, 10)}.bin`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleImportNandBin = async (file: File) => {
-    const buf = await file.arrayBuffer();
-    await nandDriver.importFullNandBin(new Uint8Array(buf));
-    await refreshAudit();
+    await nandDriver.provisionFreshNand();
     await startBoot('NONE');
   };
 
@@ -343,6 +349,8 @@ export default function App() {
           void startBoot(override);
         } else {
           abortRef.current?.abort();
+          soundEngine.stopBannerJingle();
+          fcram.reset();
           setPhase('off');
           setActiveApplet(null);
         }
@@ -392,7 +400,7 @@ export default function App() {
         const item = items[selectedIndex];
         if (!item) return;
         if (item.type === 'app') {
-          if (item.appletId === 'cartridge' && !cartridgeInserted) {
+          if (item.appletId === 'cartridge' && (!cartridgeInserted || !cartridgeTicketValid)) {
             soundEngine.playError();
             return;
           }
@@ -411,6 +419,7 @@ export default function App() {
       systemState,
       selectedIndex,
       cartridgeInserted,
+      cartridgeTicketValid,
       heldBootKey,
       startBoot,
       handleExitApplet,
@@ -418,7 +427,7 @@ export default function App() {
     ]
   );
 
-  // Global keyboard bindings for effortless desktop testing
+  // Global keyboard bindings for desktop control
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -434,7 +443,7 @@ export default function App() {
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         handleDirection('down');
-      } else if (e.key === 'Enter') {
+      } else if (e.key === 'Enter' || (e.key === ' ' && activeApplet === 'cartridge')) {
         e.preventDefault();
         handleConsoleButton('A');
       } else if (e.key === 'Escape' || e.key === 'Backspace') {
@@ -446,7 +455,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleDirection, handleConsoleButton]);
+  }, [activeApplet, handleDirection, handleConsoleButton]);
 
   // Render Top & Bottom screen contents based on BootPhase & Active Applet
   const renderScreen = (screen: 'top' | 'bottom') => {
@@ -455,15 +464,11 @@ export default function App() {
         <BootScreenOverlay
           screen={screen}
           phase={phase}
-          provisionProgress={provisionProgress}
-          stage1Step={stage1Step}
-          stage2Mounts={stage2Mounts}
           panicInfo={panicInfo}
           stage2ConfigHeader={stage2ConfigHeader}
           partitionChecks={partitionChecks}
           onRepairPartition={(id) => void handleRepairPartition(id)}
           onReboot={(hold) => void startBoot(hold)}
-          onToggleStage2Flag={() => {}}
         />
       );
     }
@@ -475,7 +480,9 @@ export default function App() {
             <SystemSettingsApplet
               screen={screen}
               config={systemState.config}
+              ctrNand={systemState.ctrNand}
               onUpdateConfig={handleUpdateConfig}
+              onUpdateCtrNand={handleUpdateCtrNand}
               onFormatNand={() => void handleReflashAll()}
               onExit={() => void handleExitApplet()}
             />
@@ -499,10 +506,11 @@ export default function App() {
               titlesByApplet={titlesByApplet}
               onEarnSteps={async (steps, coins) => {
                 soundEngine.playConfirm();
+                const latestCfg = fcram.readSystemConfigCache() ?? systemState.config;
                 await handleUpdateConfig({
-                  ...systemState.config,
-                  totalSteps: systemState.config.totalSteps + steps,
-                  playCoins: Math.min(300, systemState.config.playCoins + coins),
+                  ...latestCfg,
+                  totalSteps: latestCfg.totalSteps + steps,
+                  playCoins: Math.min(300, latestCfg.playCoins + coins),
                 });
               }}
               onExit={() => void handleExitApplet()}
@@ -525,9 +533,10 @@ export default function App() {
               userData={systemState.userData}
               language={systemState.config.language}
               onSaveHighScore={async (score) => {
+                const latestUser = fcram.readUserDataCache() ?? systemState.userData;
                 await handleUpdateUserData({
-                  ...systemState.userData,
-                  cartridgeHighScore: Math.max(systemState.userData.cartridgeHighScore, score),
+                  ...latestUser,
+                  cartridgeHighScore: Math.max(latestUser.cartridgeHighScore, score),
                 });
               }}
               onExit={() => void handleExitApplet()}
@@ -540,22 +549,6 @@ export default function App() {
               userData={systemState.userData}
               language={systemState.config.language}
               onUpdateUserData={handleUpdateUserData}
-              onExit={() => void handleExitApplet()}
-            />
-          );
-        case 'nand-tool':
-          return (
-            <NandToolApplet
-              screen={screen}
-              partitionChecks={partitionChecks ?? systemState.partitionChecks}
-              language={systemState.config.language}
-              onInspectPartition={(id) => {
-                const spec = NAND_PARTITIONS.find((p) => p.id === id);
-                if (spec) setHexChunkModal(spec.startChunk);
-              }}
-              onInspectChunk={(chunkIndex) => setHexChunkModal(chunkIndex)}
-              onExportNandBin={handleExportNandBin}
-              onImportNandBin={handleImportNandBin}
               onExit={() => void handleExitApplet()}
             />
           );
@@ -589,6 +582,8 @@ export default function App() {
           titlesByApplet={titlesByApplet}
           folders={systemState.userData.folders}
           cartridgeInserted={cartridgeInserted}
+          cartridgeTicketValid={cartridgeTicketValid}
+          cartridgeUpdateVersion={cartridgeUpdateVersion}
           depth3D={depth3D}
           suspendedApplet={activeApplet}
         />
@@ -603,6 +598,8 @@ export default function App() {
         selectedIndex={selectedIndex}
         openFolderId={openFolderId}
         cartridgeInserted={cartridgeInserted}
+        cartridgeTicketValid={cartridgeTicketValid}
+        cartridgeUpdateVersion={cartridgeUpdateVersion}
         onSelectIndex={(idx) => {
           soundEngine.playCursorTick();
           setSelectedIndex(idx);
@@ -614,33 +611,37 @@ export default function App() {
         }}
         onChangeGridRows={(rows) => {
           soundEngine.playCursorTick();
-          void handleUpdateConfig({ ...systemState.config, gridRows: rows });
+          const latestCfg = fcram.readSystemConfigCache() ?? systemState.config;
+          void handleUpdateConfig({ ...latestCfg, gridRows: rows });
         }}
         onCycleBrightness={() => {
           soundEngine.playCursorTick();
-          const next = ((systemState.config.brightness % 5) + 1) as 1 | 2 | 3 | 4 | 5;
-          void handleUpdateConfig({ ...systemState.config, brightness: next });
+          const latestCfg = fcram.readSystemConfigCache() ?? systemState.config;
+          const next = ((latestCfg.brightness % 5) + 1) as 1 | 2 | 3 | 4 | 5;
+          void handleUpdateConfig({ ...latestCfg, brightness: next });
         }}
         onCycleTheme={() => {
           soundEngine.playConfirm();
-          const idx = THEME_CYCLE.indexOf(systemState.config.themeId);
+          const latestCfg = fcram.readSystemConfigCache() ?? systemState.config;
+          const idx = THEME_CYCLE.indexOf(latestCfg.themeId);
           const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length];
-          void handleUpdateConfig({ ...systemState.config, themeId: next });
+          void handleUpdateConfig({ ...latestCfg, themeId: next });
         }}
         onMoveOrCreateFolder={(action) => {
+          const latestUser = fcram.readUserDataCache() ?? systemState.userData;
           if (action.type === 'swap') {
-            const slots = [...systemState.userData.slots];
+            const slots = [...latestUser.slots];
             const tmp = slots[action.from];
             slots[action.from] = slots[action.to];
             slots[action.to] = tmp;
             soundEngine.playConfirm();
-            void handleUpdateUserData({ ...systemState.userData, slots });
+            void handleUpdateUserData({ ...latestUser, slots });
           } else {
             const folderId = `fld-${Date.now()}`;
-            const slots = [...systemState.userData.slots];
+            const slots = [...latestUser.slots];
             slots[action.slotIndex] = { type: 'folder', folderId };
             const folders: Record<string, HomeFolder> = {
-              ...systemState.userData.folders,
+              ...latestUser.folders,
               [folderId]: {
                 id: folderId,
                 name: 'New Folder',
@@ -650,7 +651,7 @@ export default function App() {
               },
             };
             soundEngine.playConfirm();
-            void handleUpdateUserData({ ...systemState.userData, slots, folders });
+            void handleUpdateUserData({ ...latestUser, slots, folders });
           }
         }}
       />
@@ -674,16 +675,6 @@ export default function App() {
           onPressButton={handleConsoleButton}
         />
       </main>
-
-      {hexChunkModal !== null && (
-        <HexInspectorModal
-          initialChunk={hexChunkModal}
-          onClose={() => setHexChunkModal(null)}
-          onMutated={() => void refreshAudit()}
-          onExportNandBin={handleExportNandBin}
-          onImportNandBin={handleImportNandBin}
-        />
-      )}
     </div>
   );
 }

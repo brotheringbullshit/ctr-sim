@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { SupportedLanguage, UserSaveData } from '../../nand/types';
 import { soundEngine } from '../../audio/soundEngine';
 import { getTranslations } from '../../i18n/translations';
@@ -32,20 +32,31 @@ export const SoundStudioApplet: React.FC<SoundStudioProps> = ({
   const [pattern, setPattern] = useState<number[]>(userData.synthPattern);
   const [playing, setPlaying] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
+  const patternRef = useRef(pattern);
   const t = getTranslations(language);
 
   useEffect(() => {
+    patternRef.current = pattern;
+  }, [pattern]);
+
+  useEffect(() => {
+    setPattern(userData.synthPattern);
+  }, [userData.synthPattern]);
+
+  useEffect(() => {
     if (!playing) return;
-    const timer = setInterval(() => {
+    const timer = window.setInterval(() => {
       setActiveStep((prev) => {
-        const next = (prev + 1) % pattern.length;
-        const note = SCALE_NOTES[pattern[next] ?? 0];
-        soundEngine.playTone(note.freq, 0.14, 'triangle', 0.25);
+        const curPattern = patternRef.current;
+        if (curPattern.length === 0) return 0;
+        const next = (prev + 1) % curPattern.length;
+        const note = SCALE_NOTES[curPattern[next] ?? 0];
+        if (note) soundEngine.playTone(note.freq, 0.14, 'triangle', 0.25);
         return next;
       });
     }, 220);
-    return () => clearInterval(timer);
-  }, [playing, pattern]);
+    return () => window.clearInterval(timer);
+  }, [playing]);
 
   if (screen === 'top') {
     return (

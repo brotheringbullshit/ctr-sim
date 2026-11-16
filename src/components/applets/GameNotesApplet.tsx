@@ -1,6 +1,7 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { GameNoteRecord, SupportedLanguage, UserSaveData } from '../../nand/types';
 import { getTranslations } from '../../i18n/translations';
+import { fcram } from '../../ram/fcram';
 
 interface GameNotesProps {
   screen: 'top' | 'bottom';
@@ -21,10 +22,16 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
 }) => {
   const [selectedNoteIdx, setSelectedNoteIdx] = useState(0);
   const [inkColor, setInkColor] = useState('#0f172a');
-  const [draftStrokes, setDraftStrokes] = useState<GameNoteRecord['strokes']>([]);
+  const [draftStrokes, setDraftStrokes] = useState<GameNoteRecord['strokes']>(() =>
+    fcram.getGameNotesDraft()
+  );
   const [isDrawing, setIsDrawing] = useState(false);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const t = getTranslations(language);
+
+  useEffect(() => {
+    fcram.setGameNotesDraft(draftStrokes);
+  }, [draftStrokes]);
 
   if (screen === 'top') {
     const activeNote = userData.notes[selectedNoteIdx] ?? userData.notes[0];
@@ -87,16 +94,20 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
     );
   }
 
-  const getRelPoint = (e: React.PointerEvent<SVGSVGElement>): [number, number] => {
-    const rect = svgRef.current!.getBoundingClientRect();
+  const getRelPoint = (e: React.PointerEvent<SVGSVGElement>): [number, number] | null => {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
     const x = ((e.clientX - rect.left) / rect.width) * 280;
     const y = ((e.clientY - rect.top) / rect.height) * 140;
     return [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
   };
 
   const handlePointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
     const pt = getRelPoint(e);
+    if (!pt) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
     setIsDrawing(true);
     setDraftStrokes((prev) => [...prev, { color: inkColor, width: 3, points: [pt] }]);
   };
@@ -104,6 +115,7 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
   const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     if (!isDrawing) return;
     const pt = getRelPoint(e);
+    if (!pt) return;
     setDraftStrokes((prev) => {
       if (prev.length === 0) return prev;
       const next = [...prev];
@@ -130,6 +142,8 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
       notes: [newNote, ...userData.notes].slice(0, 12),
     });
     setDraftStrokes([]);
+    fcram.setGameNotesDraft([]);
+    setSelectedNoteIdx(0);
   };
 
   return (
@@ -170,6 +184,7 @@ export const GameNotesApplet: React.FC<GameNotesProps> = ({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
         className="flex-1 w-full bg-white rounded-lg border border-amber-300 touch-none cursor-crosshair"
       >
         {draftStrokes.map((s, i) => (

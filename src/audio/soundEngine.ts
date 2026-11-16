@@ -1,4 +1,5 @@
 import { AppletId } from '../nand/types';
+import { fcram } from '../ram/fcram';
 
 const HEALTH_SAFETY_BANNER_SRC =
   '/assets/aistudio/103.__Prototype__Health___Safety_Information_Banner_64571c77.mp3';
@@ -52,11 +53,6 @@ const APP_BANNER_JINGLES: Record<Exclude<AppletId, 'health-safety'>, JingleNote[
     { freq: 739.99, delayMs: 85, durationSec: 0.1, type: 'triangle', gain: 0.24 },
     { freq: 880.0, delayMs: 170, durationSec: 0.12, type: 'triangle', gain: 0.24 },
     { freq: 1174.66, delayMs: 265, durationSec: 0.3, type: 'sine', gain: 0.22 },
-  ],
-  'nand-tool': [
-    { freq: 349.23, delayMs: 0, durationSec: 0.14, type: 'triangle', gain: 0.2 },
-    { freq: 523.25, delayMs: 95, durationSec: 0.14, type: 'triangle', gain: 0.22 },
-    { freq: 698.46, delayMs: 190, durationSec: 0.32, type: 'sine', gain: 0.22 },
   ],
   browser: [
     { freq: 493.88, delayMs: 0, durationSec: 0.16, type: 'sine', gain: 0.22 },
@@ -142,6 +138,8 @@ class SoundEngine {
 
         const decoded = await ctx.decodeAudioData(arrayBuf);
         this.startupBuffer = decoded;
+        // Account for actual Float32 PCM buffer stored in DSP RAM
+        fcram.setDspAudioBuffer('startup_pcm', decoded.length * decoded.numberOfChannels * 4);
         return decoded;
       } catch (err) {
         console.warn('Startup audio pre-decode failed, will use fallback:', err);
@@ -153,6 +151,9 @@ class SoundEngine {
   }
 
   public unlockAudio(): void {
+    if (this.ctx && this.ctx.state === 'running' && !this.pendingStartup) {
+      return;
+    }
     if (!this.ctx) {
       this.getOrCreateContext();
     }

@@ -16,7 +16,6 @@ import {
   Disc,
   Folder,
   FolderPlus,
-  HardDrive,
   Palette,
   PenLine,
   Sun,
@@ -30,6 +29,8 @@ interface HomeMenuGridProps {
   selectedIndex: number;
   openFolderId: string | null;
   cartridgeInserted: boolean;
+  cartridgeTicketValid?: boolean;
+  cartridgeUpdateVersion?: string | null;
   onSelectIndex: (index: number) => void;
   onLaunchApplet: (appletId: AppletId) => void;
   onOpenFolder: (folderId: string | null) => void;
@@ -48,6 +49,8 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
   selectedIndex,
   openFolderId,
   cartridgeInserted,
+  cartridgeTicketValid = true,
+  cartridgeUpdateVersion = null,
   onSelectIndex,
   onLaunchApplet,
   onOpenFolder,
@@ -92,6 +95,12 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
   }, [selectedIndex, config.gridRows, openFolderId]);
 
   useEffect(() => {
+    if (displayedItems.length > 0 && selectedIndex >= displayedItems.length) {
+      onSelectIndex(displayedItems.length - 1);
+    }
+  }, [displayedItems.length, selectedIndex, onSelectIndex]);
+
+  useEffect(() => {
     updateScrollArrows();
     const onResize = () => updateScrollArrows();
     window.addEventListener('resize', onResize);
@@ -125,7 +134,10 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
 
     if (selectedIndex === idx) {
       if (item.type === 'app') {
-        if (item.appletId === 'cartridge' && !cartridgeInserted) return;
+        if (item.appletId === 'cartridge' && (!cartridgeInserted || !cartridgeTicketValid)) {
+          onLaunchApplet(item.appletId);
+          return;
+        }
         onLaunchApplet(item.appletId);
       } else if (item.type === 'folder') {
         onOpenFolder(item.folderId);
@@ -139,7 +151,10 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
   const handlePrimaryOpen = () => {
     if (!selectedItem) return;
     if (selectedItem.type === 'app') {
-      if (selectedItem.appletId === 'cartridge' && !cartridgeInserted) return;
+      if (selectedItem.appletId === 'cartridge' && (!cartridgeInserted || !cartridgeTicketValid)) {
+        onLaunchApplet(selectedItem.appletId);
+        return;
+      }
       onLaunchApplet(selectedItem.appletId);
     } else if (selectedItem.type === 'folder') {
       onOpenFolder(selectedItem.folderId);
@@ -201,7 +216,7 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
           </div>
         </button>
 
-        {/* Center 5 Unboxed 3DS Utility Icons */}
+        {/* Center 4 Unboxed 3DS Utility Icons */}
         <div className="flex-1 min-w-0 flex items-center justify-evenly px-2">
           {/* 1. Game Notes */}
           <button
@@ -256,22 +271,6 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
               <line x1="4.5" y1="16" x2="27.5" y2="16" stroke="#0284c7" strokeWidth="1.9" />
               <line x1="6.5" y1="10.5" x2="25.5" y2="10.5" stroke="#0284c7" strokeWidth="1.7" />
               <line x1="6.5" y1="21.5" x2="25.5" y2="21.5" stroke="#0284c7" strokeWidth="1.7" />
-            </svg>
-          </button>
-
-          {/* 5. NAND Inspector */}
-          <button
-            onClick={() => onLaunchApplet('nand-tool')}
-            title="CTR-NAND System Inspector"
-            className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center hover:scale-110 active:scale-95 transition-transform cursor-pointer"
-          >
-            <svg viewBox="0 0 34 32" className="w-full h-full drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)]">
-              <circle cx="9.5" cy="12" r="3" fill="#dcfce7" stroke="#16a34a" strokeWidth="2" />
-              <path d="M4.5 23.5c0-3 2.2-5 5-5s5 2 5 5" fill="#dcfce7" stroke="#16a34a" strokeWidth="2" strokeLinecap="round" />
-              <circle cx="24.5" cy="12" r="3" fill="#dcfce7" stroke="#16a34a" strokeWidth="2" />
-              <path d="M19.5 23.5c0-3 2.2-5 5-5s5 2 5 5" fill="#dcfce7" stroke="#16a34a" strokeWidth="2" strokeLinecap="round" />
-              <circle cx="17" cy="9.5" r="3.4" fill="#ffffff" stroke="#16a34a" strokeWidth="2.2" />
-              <path d="M11 25c0-3.6 2.6-6 6-6s6 2.4 6 6" fill="#ffffff" stroke="#16a34a" strokeWidth="2.2" strokeLinecap="round" />
             </svg>
           </button>
         </div>
@@ -401,11 +400,18 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
                   ) : (
                     <button
                       onClick={() => handleTileClick(idx, item)}
-                      className={`w-full h-full flex items-center justify-center transition-transform cursor-pointer p-1.5 rounded-2xl bg-gradient-to-b from-white to-slate-100 border border-slate-300 shadow-sm ${
+                      className={`relative w-full h-full flex items-center justify-center transition-transform cursor-pointer p-1.5 rounded-2xl bg-gradient-to-b from-white to-slate-100 border border-slate-300 shadow-sm ${
                         isSelected ? 'scale-[1.03]' : 'hover:scale-[1.01]'
-                      } ${isMovingSource ? 'ring-2 ring-amber-500' : ''}`}
+                      } ${isMovingSource ? 'ring-2 ring-amber-500' : ''} ${
+                        item.appletId === 'cartridge' && !cartridgeTicketValid ? 'opacity-65' : ''
+                      }`}
                     >
                       {renderGlossyTile(item.appletId, item.appletId === 'cartridge' && !cartridgeInserted)}
+                      {item.appletId === 'cartridge' && cartridgeInserted && !cartridgeTicketValid && (
+                        <span className="absolute -bottom-1 -right-1 px-1 py-0.5 rounded bg-rose-600 text-white text-[8px] font-mono font-bold shadow">
+                          NO TIK
+                        </span>
+                      )}
                     </button>
                   )}
                 </div>
@@ -455,6 +461,8 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
             : selectedItem?.type === 'app'
             ? selectedItem.appletId === 'cartridge' && !cartridgeInserted
               ? t.noCartridge
+              : selectedItem.appletId === 'cartridge' && !cartridgeTicketValid
+              ? 'Missing Ticket (.tik)'
               : getLocalizedTitle(selectedItem.appletId, config.language).shortName
             : selectedItem?.type === 'folder'
             ? userData.folders[selectedItem.folderId]?.name
@@ -465,7 +473,9 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
           onClick={handlePrimaryOpen}
           disabled={
             !selectedItem ||
-            (selectedItem.type === 'app' && selectedItem.appletId === 'cartridge' && !cartridgeInserted) ||
+            (selectedItem.type === 'app' &&
+              selectedItem.appletId === 'cartridge' &&
+              (!cartridgeInserted || !cartridgeTicketValid)) ||
             (selectedItem.type === 'empty' && Boolean(activeFolder))
           }
           className="px-3.5 py-1 rounded-lg font-bold transition-opacity disabled:opacity-35 cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 text-xs shadow-2xs"
@@ -536,8 +546,15 @@ export const HomeMenuGrid: React.FC<HomeMenuGridProps> = ({
             </div>
             <div className="font-mono text-slate-400 text-[11px] mt-1">
               Title ID: {titlesByApplet[selectedItem.appletId]?.titleId ?? '00040000'} ·{' '}
-              {titlesByApplet[selectedItem.appletId]?.version ?? 'v1.0.0'}
+              {selectedItem.appletId === 'cartridge' && cartridgeUpdateVersion
+                ? `${titlesByApplet[selectedItem.appletId]?.version ?? 'v1.0.0'} (+Update ${cartridgeUpdateVersion})`
+                : titlesByApplet[selectedItem.appletId]?.version ?? 'v1.0.0'}
             </div>
+            {selectedItem.appletId === 'cartridge' && !cartridgeTicketValid && (
+              <div className="mt-2 px-2.5 py-1.5 rounded bg-rose-950/70 border border-rose-500/40 text-rose-200 text-[11px] font-mono">
+                No Ticket (.tik) found in /dbs/ticket.db for 0004000000030800. Restore it in System Settings → Titles.
+              </div>
+            )}
             <p className="text-slate-300 text-xs mt-3 leading-relaxed">
               {getLocalizedTitle(selectedItem.appletId, config.language).description}
             </p>
@@ -626,12 +643,6 @@ function renderGlossyTile(id: AppletId, emptyCard: boolean) {
       return (
         <div className="w-full h-full rounded-xl bg-gradient-to-b from-amber-300 to-yellow-500 flex items-center justify-center text-white">
           <PenLine className="w-1/2 h-1/2" />
-        </div>
-      );
-    case 'nand-tool':
-      return (
-        <div className="w-full h-full rounded-xl bg-gradient-to-b from-indigo-500 to-slate-900 flex items-center justify-center">
-          <HardDrive className="w-1/2 h-1/2 text-white" />
         </div>
       );
     case 'browser':

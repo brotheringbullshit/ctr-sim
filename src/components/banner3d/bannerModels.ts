@@ -704,48 +704,6 @@ export function buildBannerModel(
       break;
     }
 
-    case 'nand-tool': {
-      // Matte PCB + Raised IC Heatspreader + 12 Gold TSOP Leads + Rotating Emerald Cryptographic Shield Ring
-      const pcbMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x1e1b4b, roughness: 0.55, metalness: 0.25 }));
-      const chipMat = trackMat(new THREE.MeshStandardMaterial({ map: textures.nandChipLabel, roughness: 0.28, metalness: 0.45 }));
-      const goldPinMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.18, metalness: 0.92 }));
-      const holoMat = trackMat(
-        new THREE.MeshStandardMaterial({
-          color: 0x34d399,
-          roughness: 0.2,
-          metalness: 0.8,
-          emissive: 0x10b981,
-          emissiveIntensity: 0.35,
-        })
-      );
-
-      const pcb = new THREE.Mesh(trackGeo(new RoundedBoxGeometry(2.1, 1.38, 0.2, 3, 0.08)), pcbMat);
-      const icTop = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.75, 0.96, 0.16)), chipMat);
-      icTop.position.z = 0.13;
-
-      const pinGeo = trackGeo(new THREE.BoxGeometry(0.11, 0.22, 0.08));
-      for (let i = 0; i < 6; i++) {
-        const x = -0.68 + i * 0.27;
-        const pTop = new THREE.Mesh(pinGeo, goldPinMat);
-        pTop.position.set(x, 0.56, 0.1);
-        const pBot = new THREE.Mesh(pinGeo, goldPinMat);
-        pBot.position.set(x, -0.56, 0.1);
-        subject.add(pTop, pBot);
-      }
-
-      const shieldRing = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(1.36, 0.032, 12, 48)), holoMat);
-      shieldRing.rotation.x = Math.PI * 0.35;
-
-      subject.add(pcb, icTop, shieldRing);
-      animateFn = (t) => {
-        subject.position.y = Math.sin(t * 1.9) * 0.07;
-        subject.rotation.y = Math.sin(t * 1.0) * 0.28;
-        shieldRing.rotation.z = t * 0.95;
-        shieldRing.rotation.y = Math.sin(t * 1.3) * 0.35;
-      };
-      break;
-    }
-
     case 'browser': {
       // Textured 3D Earth Globe + Clearcoat Atmosphere Shell + Twin Intersecting Orbital Rings + Data Satellite
       const globeMat = trackMat(

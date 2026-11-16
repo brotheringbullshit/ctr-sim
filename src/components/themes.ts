@@ -6,9 +6,7 @@ export interface HomeThemeStyle {
   topBg: string;
   topPatternColor: string;
   topText: string;
-  topSubtext: string;
   bottomBg: string;
-  bottomGridLine: string;
   trayBg: string;
   trayBorder: string;
   topTabBg: string;
@@ -30,9 +28,7 @@ export const HOME_THEMES: Record<ConsoleThemeId, HomeThemeStyle> = {
     topBg: 'linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%)',
     topPatternColor: 'rgba(148, 163, 184, 0.22)',
     topText: '#0f172a',
-    topSubtext: '#475569',
     bottomBg: 'linear-gradient(180deg, #f2f6fb 0%, #e7eef6 55%, #eef3f9 100%)',
-    bottomGridLine: 'rgba(148, 163, 184, 0.24)',
     trayBg: 'linear-gradient(180deg, #d7d5ce 0%, #e3e1da 100%)',
     trayBorder: '#c2c0b8',
     topTabBg: 'linear-gradient(180deg, #f3f7fc 0%, #dde6f2 100%)',
@@ -52,9 +48,7 @@ export const HOME_THEMES: Record<ConsoleThemeId, HomeThemeStyle> = {
     topBg: 'linear-gradient(180deg, #1e293b 0%, #0f172a 100%)',
     topPatternColor: 'rgba(148, 163, 184, 0.1)',
     topText: '#f8fafc',
-    topSubtext: '#94a3b8',
     bottomBg: 'linear-gradient(180deg, #1e293b 0%, #0f172a 100%)',
-    bottomGridLine: 'rgba(100, 116, 139, 0.2)',
     trayBg: 'linear-gradient(180deg, #0b1220 0%, #162033 100%)',
     trayBorder: '#334155',
     topTabBg: 'linear-gradient(180deg, #334155 0%, #1e293b 100%)',
@@ -74,9 +68,7 @@ export const HOME_THEMES: Record<ConsoleThemeId, HomeThemeStyle> = {
     topBg: 'linear-gradient(180deg, #e0f2fe 0%, #bae6fd 100%)',
     topPatternColor: 'rgba(2, 132, 199, 0.12)',
     topText: '#0c4a6e',
-    topSubtext: '#0369a1',
     bottomBg: 'linear-gradient(180deg, #e0f2fe 0%, #bae6fd 100%)',
-    bottomGridLine: 'rgba(14, 165, 233, 0.2)',
     trayBg: 'linear-gradient(180deg, #cbe6fa 0%, #dbeefe 100%)',
     trayBorder: '#93c5fd',
     topTabBg: 'linear-gradient(180deg, #f0f9ff 0%, #cce8fc 100%)',
@@ -96,9 +88,7 @@ export const HOME_THEMES: Record<ConsoleThemeId, HomeThemeStyle> = {
     topBg: 'linear-gradient(180deg, #fff1f2 0%, #ffe4e6 100%)',
     topPatternColor: 'rgba(225, 29, 72, 0.1)',
     topText: '#881337',
-    topSubtext: '#be123c',
     bottomBg: 'linear-gradient(180deg, #fff1f2 0%, #fecdd3 100%)',
-    bottomGridLine: 'rgba(225, 29, 72, 0.16)',
     trayBg: 'linear-gradient(180deg, #f8d4da 0%, #fce3e7 100%)',
     trayBorder: '#fda4af',
     topTabBg: 'linear-gradient(180deg, #fff5f6 0%, #ffdbe0 100%)',
@@ -118,9 +108,7 @@ export const HOME_THEMES: Record<ConsoleThemeId, HomeThemeStyle> = {
     topBg: 'linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%)',
     topPatternColor: 'rgba(5, 150, 105, 0.1)',
     topText: '#064e3b',
-    topSubtext: '#047857',
     bottomBg: 'linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%)',
-    bottomGridLine: 'rgba(16, 185, 129, 0.18)',
     trayBg: 'linear-gradient(180deg, #c6ece0 0%, #daf5ec 100%)',
     trayBorder: '#6ee7b7',
     topTabBg: 'linear-gradient(180deg, #f0fdf8 0%, #cff5e6 100%)',

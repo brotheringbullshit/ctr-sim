@@ -124,14 +124,6 @@ export interface SystemTranslations {
   miiHairStyle: string;
   miiShirtColor: string;
   miiSaveMii: string;
-
-  // NAND Tool
-  nandTitle: string;
-  nandDiagnostics: string;
-  nandExportBin: string;
-  nandImportBin: string;
-  nandInspectPartition: string;
-  nandKeyslotStatus: string;
 }
 
 const TITLES_MAP: Record<SupportedLanguage, Record<AppletId, TitleI18n>> = {
@@ -170,11 +162,6 @@ const TITLES_MAP: Record<SupportedLanguage, Record<AppletId, TitleI18n>> = {
       shortName: 'Game Notes',
       fullName: 'Game Notes',
       description: 'Stylus sketch pad for writing game memos, mapping dungeons, and saving sketches.',
-    },
-    'nand-tool': {
-      shortName: 'CTR-NAND Tool',
-      fullName: 'CTR-NAND Tool & Partition Auditor',
-      description: 'Inspect AES hardware keyslots, audit partition digests, and export raw CTR-NAND image.',
     },
     browser: {
       shortName: 'Internet Browser',
@@ -224,11 +211,6 @@ const TITLES_MAP: Record<SupportedLanguage, Record<AppletId, TitleI18n>> = {
       fullName: 'Notas de juego',
       description: 'Bloc de notas táctil para dibujar planos y tomar apuntes durante tus partidas.',
     },
-    'nand-tool': {
-      shortName: 'Gestor NAND',
-      fullName: 'Herramienta de diagnóstico NAND',
-      description: 'Audita firmas RSA, ranuras criptográficas AES-128 y respalda la memoria CTR.',
-    },
     browser: {
       shortName: 'Navegador',
       fullName: 'Navegador de internet',
@@ -276,11 +258,6 @@ const TITLES_MAP: Record<SupportedLanguage, Record<AppletId, TitleI18n>> = {
       shortName: 'Notes de jeu',
       fullName: 'Notes de jeu',
       description: 'Carnet de dessin au stylet pour croquer des cartes et noter vos stratégies.',
-    },
-    'nand-tool': {
-      shortName: 'Outil NAND',
-      fullName: 'Outil de diagnostic CTR-NAND',
-      description: 'Inspectez les partitions chiffrées AES-128, clés matérielles et sauvegardez le dump.',
     },
     browser: {
       shortName: 'Navigateur',
@@ -330,11 +307,6 @@ const TITLES_MAP: Record<SupportedLanguage, Record<AppletId, TitleI18n>> = {
       fullName: 'Spielnotizen',
       description: 'Praktischer Skizzenblock für handgezeichnete Memos und Spieltipps.',
     },
-    'nand-tool': {
-      shortName: 'NAND-Tool',
-      fullName: 'CTR-NAND Diagnose-Werkzeug',
-      description: 'Hardware-AES-Schlüssel prüfen, Partitionsintegrität testen und NAND sichern.',
-    },
     browser: {
       shortName: 'Internet-Browser',
       fullName: 'Internet-Browser',
@@ -382,11 +354,6 @@ const TITLES_MAP: Record<SupportedLanguage, Record<AppletId, TitleI18n>> = {
       shortName: 'Note di gioco',
       fullName: 'Note di gioco',
       description: 'Blocco note con pennino per tracciare mappe e appunti durante le sessioni.',
-    },
-    'nand-tool': {
-      shortName: 'Strumento NAND',
-      fullName: 'Strumento di diagnostica CTR-NAND',
-      description: 'Verifica le chiavi crittografiche AES-128 e crea copie dell’immagine NAND.',
     },
     browser: {
       shortName: 'Browser',
@@ -436,11 +403,6 @@ const TITLES_MAP: Record<SupportedLanguage, Record<AppletId, TitleI18n>> = {
       fullName: 'ゲームメモ',
       description: 'タッチペンを使って手書きのメモや攻略マップを描き残せます。',
     },
-    'nand-tool': {
-      shortName: 'NANDツール',
-      fullName: 'CTR-NAND診断・バックアップ',
-      description: 'ハードウェアAESキースロットの確認、パーティション暗号検査、RAW出力。',
-    },
     browser: {
       shortName: 'ブラウザー',
       fullName: 'インターネットブラウザー',
@@ -488,11 +450,6 @@ const TITLES_MAP: Record<SupportedLanguage, Record<AppletId, TitleI18n>> = {
       shortName: 'Notas de Jogo',
       fullName: 'Notas de Jogo',
       description: 'Bloco de notas com caneta para desenhar mapas e registar estratégias.',
-    },
-    'nand-tool': {
-      shortName: 'Ferramenta NAND',
-      fullName: 'Diagnóstico e Cópia CTR-NAND',
-      description: 'Inspecione chaves de hardware AES-128, integridade de partições e faça cópias.',
     },
     browser: {
       shortName: 'Navegador',
@@ -599,13 +556,6 @@ const TRANSLATIONS: Record<SupportedLanguage, SystemTranslations> = {
     miiHairStyle: 'Hair Style',
     miiShirtColor: 'Shirt Color',
     miiSaveMii: 'Save Mii',
-
-    nandTitle: 'CTR-NAND Tool',
-    nandDiagnostics: 'Diagnostics & Backup',
-    nandExportBin: 'Export NAND.bin',
-    nandImportBin: 'Import NAND.bin',
-    nandInspectPartition: 'Hex Inspector',
-    nandKeyslotStatus: 'AES Hardware Keyslots',
   },
 
   es: {
@@ -699,13 +649,6 @@ const TRANSLATIONS: Record<SupportedLanguage, SystemTranslations> = {
     miiHairStyle: 'Peinado',
     miiShirtColor: 'Color de camiseta',
     miiSaveMii: 'Guardar Mii',
-
-    nandTitle: 'Gestor NAND',
-    nandDiagnostics: 'Diagnóstico y copia',
-    nandExportBin: 'Exportar NAND.bin',
-    nandImportBin: 'Importar NAND.bin',
-    nandInspectPartition: 'Inspector Hex',
-    nandKeyslotStatus: 'Ranuras de clave AES',
   },
 
   fr: {
@@ -799,13 +742,6 @@ const TRANSLATIONS: Record<SupportedLanguage, SystemTranslations> = {
     miiHairStyle: 'Coiffure',
     miiShirtColor: 'Couleur du t-shirt',
     miiSaveMii: 'Sauvegarder Mii',
-
-    nandTitle: 'Outil NAND',
-    nandDiagnostics: 'Diagnostics et sauvegarde',
-    nandExportBin: 'Exporter NAND.bin',
-    nandImportBin: 'Importer NAND.bin',
-    nandInspectPartition: 'Inspecteur Hex',
-    nandKeyslotStatus: 'Slots de clé AES',
   },
 
   de: {
@@ -899,13 +835,6 @@ const TRANSLATIONS: Record<SupportedLanguage, SystemTranslations> = {
     miiHairStyle: 'Frisur',
     miiShirtColor: 'T-Shirt-Farbe',
     miiSaveMii: 'Mii speichern',
-
-    nandTitle: 'NAND-Tool',
-    nandDiagnostics: 'Diagnose & Sicherung',
-    nandExportBin: 'NAND.bin exportieren',
-    nandImportBin: 'NAND.bin importieren',
-    nandInspectPartition: 'Hex-Inspektor',
-    nandKeyslotStatus: 'AES-Hardwareschlüssel',
   },
 
   it: {
@@ -999,13 +928,6 @@ const TRANSLATIONS: Record<SupportedLanguage, SystemTranslations> = {
     miiHairStyle: 'Pettinatura',
     miiShirtColor: 'Colore maglietta',
     miiSaveMii: 'Salva Mii',
-
-    nandTitle: 'Strumento NAND',
-    nandDiagnostics: 'Diagnostica e backup',
-    nandExportBin: 'Esporta NAND.bin',
-    nandImportBin: 'Importa NAND.bin',
-    nandInspectPartition: 'Ispettore Hex',
-    nandKeyslotStatus: 'Slot chiavi AES',
   },
 
   ja: {
@@ -1099,13 +1021,6 @@ const TRANSLATIONS: Record<SupportedLanguage, SystemTranslations> = {
     miiHairStyle: 'かみがた',
     miiShirtColor: '服の色',
     miiSaveMii: 'Miiを保存',
-
-    nandTitle: 'NANDツール',
-    nandDiagnostics: '診断とバックアップ',
-    nandExportBin: 'NAND.bin出力',
-    nandImportBin: 'NAND.bin復元',
-    nandInspectPartition: 'HEXインスペクタ',
-    nandKeyslotStatus: 'AESキースロット',
   },
 
   pt: {
@@ -1199,13 +1114,6 @@ const TRANSLATIONS: Record<SupportedLanguage, SystemTranslations> = {
     miiHairStyle: 'Penteado',
     miiShirtColor: 'Cor da camisa',
     miiSaveMii: 'Salvar Mii',
-
-    nandTitle: 'Ferramenta NAND',
-    nandDiagnostics: 'Diagnóstico e cópia',
-    nandExportBin: 'Exportar NAND.bin',
-    nandImportBin: 'Importar NAND.bin',
-    nandInspectPartition: 'Inspetor Hex',
-    nandKeyslotStatus: 'Slots de chave AES',
   },
 };
 

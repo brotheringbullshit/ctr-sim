@@ -7,6 +7,7 @@ import {
   buildBannerModel,
 } from './banner3d/bannerModels';
 import { BannerTextureSet, createBannerTextureSet } from './banner3d/materials';
+import { fcram } from '../ram/fcram';
 
 interface Banner3DViewportProps {
   kind: BannerSceneKind;
@@ -14,8 +15,6 @@ interface Banner3DViewportProps {
   folderBadgeChar?: string;
   depth3D: number;
 }
-
-const _clockDelta = { value: 0 };
 
 function detectSoftwareWebGL(): boolean {
   try {
@@ -148,6 +147,8 @@ export const Banner3DViewport: React.FC<Banner3DViewportProps> = ({
       popScale: 0.72,
     };
 
+    fcram.setVramBanner(kind, 3 * 1024 * 1024);
+
     if (!isSoftwareGl) {
       renderer.compile(scene, camera);
     }
@@ -163,14 +164,15 @@ export const Banner3DViewport: React.FC<Banner3DViewportProps> = ({
     });
     resizeObserver.observe(container);
 
-    let frameId = 0;
+    let rafId = 0;
+    let pollTimerId = 0;
     let disposed = false;
     const clock = new THREE.Clock();
 
     function afterDraw(cb: () => void) {
       const gl = renderer.getContext() as WebGL2RenderingContext;
       if (typeof gl.fenceSync !== 'function') {
-        frameId = window.setTimeout(cb, 80);
+        pollTimerId = window.setTimeout(cb, 80);
         return;
       }
       const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -179,19 +181,18 @@ export const Banner3DViewport: React.FC<Banner3DViewportProps> = ({
         if (disposed) return;
         const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
         if (state === gl.UNSIGNALED) {
-          frameId = window.setTimeout(poll, 5);
+          pollTimerId = window.setTimeout(poll, 5);
         } else {
           if (sync) gl.deleteSync(sync);
-          frameId = window.setTimeout(cb, 80);
+          pollTimerId = window.setTimeout(cb, 80);
         }
       };
-      frameId = window.setTimeout(poll, 5);
+      pollTimerId = window.setTimeout(poll, 5);
     }
 
     function tick() {
       if (disposed) return;
       const dt = Math.min(clock.getDelta(), 0.08);
-      _clockDelta.value = dt;
       const elapsed = clock.getElapsedTime();
       const refs = sceneRefs.current;
 
@@ -232,17 +233,18 @@ export const Banner3DViewport: React.FC<Banner3DViewportProps> = ({
       if (isSoftwareGl) {
         afterDraw(tick);
       } else {
-        frameId = requestAnimationFrame(tick);
+        rafId = requestAnimationFrame(tick);
       }
     }
 
-    frameId = requestAnimationFrame(tick);
+    rafId = requestAnimationFrame(tick);
 
     return () => {
       disposed = true;
-      cancelAnimationFrame(frameId);
-      clearTimeout(frameId);
+      cancelAnimationFrame(rafId);
+      clearTimeout(pollTimerId);
       resizeObserver.disconnect();
+      fcram.setVramBanner(null, 0);
 
       if (sceneRefs.current?.activeModel) {
         pivot.remove(sceneRefs.current.activeModel.root);
@@ -282,6 +284,7 @@ export const Banner3DViewport: React.FC<Banner3DViewportProps> = ({
     refs.pivot.add(nextModel.root);
     refs.activeModel = nextModel;
     refs.popScale = 0.68;
+    fcram.setVramBanner(kind, 3 * 1024 * 1024);
   }, [kind, folderColor, folderBadgeChar]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {

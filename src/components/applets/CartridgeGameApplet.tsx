@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { SupportedLanguage, UserSaveData } from '../../nand/types';
 import { soundEngine } from '../../audio/soundEngine';
 import { getTranslations } from '../../i18n/translations';
+import { CartridgeRuntimeState, fcram } from '../../ram/fcram';
 
 interface CartridgeGameProps {
   screen: 'top' | 'bottom';
@@ -11,35 +12,28 @@ interface CartridgeGameProps {
   onExit: () => void;
 }
 
-interface Enemy {
-  id: number;
-  x: number;
-  y: number;
-  speed: number;
-}
-interface Bullet {
-  id: number;
-  x: number;
-  y: number;
-}
-
-const listeners = new Set<() => void>();
-let gState = {
+const DEFAULT_GAME_STATE: CartridgeRuntimeState = {
   running: false,
   gameOver: false,
   shipX: 50,
   score: 0,
-  enemies: [] as Enemy[],
-  bullets: [] as Bullet[],
+  enemies: [],
+  bullets: [],
   nextId: 1,
 };
+
+function readRamGameState(): CartridgeRuntimeState {
+  return fcram.getCartridgeState() ?? DEFAULT_GAME_STATE;
+}
+
+const listeners = new Set<() => void>();
 
 function notify() {
   listeners.forEach((fn) => fn());
 }
 
 export function resetStarburstGame() {
-  gState = {
+  fcram.setCartridgeState({
     running: true,
     gameOver: false,
     shipX: 50,
@@ -47,23 +41,29 @@ export function resetStarburstGame() {
     enemies: [],
     bullets: [],
     nextId: 1,
-  };
+  });
   notify();
 }
 
 export function moveStarburstShip(deltaX: number) {
-  if (!gState.running) return;
-  gState = { ...gState, shipX: Math.max(8, Math.min(92, gState.shipX + deltaX)) };
+  const cur = readRamGameState();
+  if (!cur.running) return;
+  fcram.setCartridgeState({
+    ...cur,
+    shipX: Math.max(8, Math.min(92, cur.shipX + deltaX)),
+  });
   notify();
 }
 
 export function fireStarburstLaser() {
-  if (!gState.running) return;
+  const cur = readRamGameState();
+  if (!cur.running) return;
   soundEngine.playTone(880, 0.05, 'square', 0.14);
-  gState = {
-    ...gState,
-    bullets: [...gState.bullets, { id: gState.nextId++, x: gState.shipX, y: 80 }],
-  };
+  fcram.setCartridgeState({
+    ...cur,
+    nextId: cur.nextId + 1,
+    bullets: [...cur.bullets, { id: cur.nextId, x: cur.shipX, y: 80 }],
+  });
   notify();
 }
 
@@ -76,6 +76,7 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
 }) => {
   const [, setTick] = useState(0);
   const highSavedRef = useRef(userData.cartridgeHighScore);
+  const saveHighScoreRef = useRef(onSaveHighScore);
   const t = getTranslations(language);
 
   useEffect(() => {
@@ -83,7 +84,11 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
   }, [userData.cartridgeHighScore]);
 
   useEffect(() => {
-    const cb = () => setTick((t) => t + 1);
+    saveHighScoreRef.current = onSaveHighScore;
+  }, [onSaveHighScore]);
+
+  useEffect(() => {
+    const cb = () => setTick((n) => n + 1);
     listeners.add(cb);
     return () => {
       listeners.delete(cb);
@@ -93,18 +98,23 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
   // Only top screen runs the simulation tick loop so speed doesn't double
   useEffect(() => {
     if (screen !== 'top') return;
-    if (!gState.running) resetStarburstGame();
+    if (!readRamGameState().running && !readRamGameState().gameOver) {
+      resetStarburstGame();
+    }
 
-    const timer = setInterval(() => {
-      if (!gState.running) return;
-      const enemies = gState.enemies.map((e) => ({ ...e, y: e.y + e.speed }));
-      const bullets = gState.bullets.map((b) => ({ ...b, y: b.y - 6 })).filter((b) => b.y > -5);
-      let score = gState.score;
+    const timer = window.setInterval(() => {
+      const cur = readRamGameState();
+      if (!cur.running) return;
+
+      const enemies = cur.enemies.map((e) => ({ ...e, y: e.y + e.speed }));
+      const bullets = cur.bullets.map((b) => ({ ...b, y: b.y - 6 })).filter((b) => b.y > -5);
+      let score = cur.score;
+      let nextId = cur.nextId;
       let gameOver = false;
 
       if (Math.random() < 0.09) {
         enemies.push({
-          id: gState.nextId++,
+          id: nextId++,
           x: 10 + Math.random() * 80,
           y: -6,
           speed: 1.5 + Math.random() * 1.4,
@@ -112,14 +122,14 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
       }
 
       // Collision detection
-      const remainingEnemies: Enemy[] = [];
+      const remainingEnemies: CartridgeRuntimeState['enemies'] = [];
       for (const e of enemies) {
         const hitIdx = bullets.findIndex((b) => Math.abs(b.x - e.x) < 8 && Math.abs(b.y - e.y) < 8);
         if (hitIdx !== -1) {
           bullets.splice(hitIdx, 1);
           score += 25;
           soundEngine.playTone(540, 0.07, 'triangle', 0.16);
-        } else if (e.y > 84 && Math.abs(e.x - gState.shipX) < 10) {
+        } else if (e.y > 84 && Math.abs(e.x - cur.shipX) < 10) {
           gameOver = true;
         } else if (e.y < 102) {
           remainingEnemies.push(e);
@@ -129,23 +139,26 @@ export const CartridgeGameApplet: React.FC<CartridgeGameProps> = ({
       if (gameOver) {
         soundEngine.playError();
         if (score > highSavedRef.current) {
-          void onSaveHighScore(score);
+          void saveHighScoreRef.current(score);
         }
       }
 
-      gState = {
-        ...gState,
+      fcram.setCartridgeState({
+        ...cur,
         enemies: remainingEnemies,
         bullets,
         score,
+        nextId,
         running: !gameOver,
         gameOver,
-      };
+      });
       notify();
     }, 55);
 
-    return () => clearInterval(timer);
-  }, [screen, onSaveHighScore]);
+    return () => window.clearInterval(timer);
+  }, [screen]);
+
+  const gState = readRamGameState();
 
   if (screen === 'top') {
     return (

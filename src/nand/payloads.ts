@@ -1,9 +1,16 @@
 import {
+  CertChainEntry,
   CHUNK_SIZE,
+  ConsoleIdentityFiles,
+  CtrNandArchiveData,
   NAND_PARTITIONS,
   PartitionId,
   SystemConfig,
   SystemTitleEntry,
+  TitleCategoryHigh,
+  TitleDatabaseEntry,
+  TitlePackage,
+  TitleTicket,
   UserSaveData,
   Stage1Opcode,
   BootStage2Header,
@@ -27,6 +34,40 @@ export function getPartitionByteSize(id: PartitionId): number {
   return (spec.endChunk - spec.startChunk + 1) * CHUNK_SIZE;
 }
 
+function deterministicHex(seed: string, hexLen: number): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  let out = '';
+  let round = 0;
+  while (out.length < hexLen) {
+    const input = `${seed}:${round++}`;
+    for (let i = 0; i < input.length; i++) {
+      h1 ^= input.charCodeAt(i);
+      h1 = Math.imul(h1, 0x01000193) >>> 0;
+      h2 = Math.imul(h2 ^ input.charCodeAt(i), 0x85ebca6b) >>> 0;
+    }
+    out += h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+  }
+  return out.slice(0, hexLen);
+}
+
+export function getDefaultConsoleIdentity(
+  region: 'USA' | 'EUR' | 'JPN' = 'USA',
+  serialNumber = 'CW70492184'
+): ConsoleIdentityFiles {
+  const movableSedKeyHex = deterministicHex(`CTR_MOVABLE_SED:${serialNumber}`, 32);
+  const id0 = deterministicHex(`ID0:${movableSedKeyHex}`, 32);
+  const id1 = deterministicHex(`ID1:SDMC_CTR:${serialNumber}`, 32);
+  return {
+    id0,
+    id1,
+    movableSedKeyHex,
+    secureInfoRegionByte: region,
+    secureInfoSerial: serialNumber,
+    localFriendCodeSeedHex: deterministicHex(`LFCS_B:${serialNumber}`, 32),
+  };
+}
+
 export function getDefaultSystemConfig(): SystemConfig {
   return {
     ownerName: 'Player 1',
@@ -42,8 +83,7 @@ export function getDefaultSystemConfig(): SystemConfig {
     playCoins: 14,
     totalSteps: 1480,
     bootCount: 1,
-    autobootHome: true,
-    showSplashBanner: true,
+    identity: getDefaultConsoleIdentity('USA', 'CW70492184'),
   };
 }
 
@@ -141,19 +181,6 @@ export function getDefaultSystemTitles(): SystemTitleEntry[] {
       description: 'Touchscreen stylus sketchpad saved as vector stroke records inside IDB NAND chunks.',
     },
     {
-      titleId: '000400000F800100',
-      appletId: 'nand-tool',
-      shortName: 'CTR-NAND Tool',
-      fullName: 'CTR-NAND System Inspector',
-      publisher: 'Boot9Sys',
-      version: 'v2.4.0',
-      accentColor: '#6366f1',
-      secondaryColor: '#e0e7ff',
-      chimeFreqs: [349.23, 440, 523.25, 698.46],
-      blocks: 42,
-      description: 'Inspect mounted nand:/ and ctrnand:/ partitions, SHA-256 digests, and hex sectors.',
-    },
-    {
       titleId: '0004003000008C02',
       appletId: 'browser',
       shortName: 'Net Browser',
@@ -182,6 +209,542 @@ export function getDefaultSystemTitles(): SystemTitleEntry[] {
   ];
 }
 
+interface RawTitleBlueprint {
+  titleId: string;
+  productCode: string;
+  publisher: string;
+  shortName: string;
+  fullName: string;
+  version: string;
+  titleVersion: number;
+  mediaType: 'NAND' | 'SD' | 'GAMECARD' | 'TWLN';
+  blocks: number;
+  exefsKb: number;
+  romfsKb: number;
+  hasManual?: boolean;
+  stagedImport?: boolean;
+  appletId?: SystemTitleEntry['appletId'];
+  description: string;
+}
+
+const CTR_TITLE_BLUEPRINTS: RawTitleBlueprint[] = [
+  {
+    titleId: '0004000000030800',
+    productCode: 'CTR-P-SBPT',
+    publisher: 'CTR Studio',
+    shortName: 'Starburst Pilot 3D',
+    fullName: 'Starburst Pilot 3D (Game Card)',
+    version: 'v1.2.0',
+    titleVersion: 12288,
+    mediaType: 'GAMECARD',
+    blocks: 512,
+    exefsKb: 256,
+    romfsKb: 4864,
+    hasManual: true,
+    appletId: 'cartridge',
+    description: 'Playable dual-screen arcade shooter mounted via Game Card / NCSD NCCH container.',
+  },
+  {
+    titleId: '0004000E00030800',
+    productCode: 'CTR-U-SBPT',
+    publisher: 'CTR Studio',
+    shortName: 'Starburst Update',
+    fullName: 'Starburst Pilot 3D Update Ver. 1.2.1',
+    version: 'v1.2.1',
+    titleVersion: 12304,
+    mediaType: 'SD',
+    blocks: 38,
+    exefsKb: 128,
+    romfsKb: 384,
+    stagedImport: true,
+    description: 'Staged title update patch in import.db ready for final installation into title.db & ticket.db.',
+  },
+  {
+    titleId: '0004001000021000',
+    productCode: 'CTR-N-HAAE',
+    publisher: 'Nintendo',
+    shortName: 'System Settings',
+    fullName: 'System Settings',
+    version: 'v11.17',
+    titleVersion: 11264,
+    mediaType: 'NAND',
+    blocks: 48,
+    exefsKb: 192,
+    romfsKb: 1024,
+    appletId: 'system-settings',
+    description: 'Configure Owner Profile, Language, Theme, Data Management, and FCRAM/NAND state.',
+  },
+  {
+    titleId: '0004001000021100',
+    productCode: 'CTR-N-HADE',
+    publisher: 'Nintendo',
+    shortName: 'Download Play',
+    fullName: 'Nintendo 3DS Download Play',
+    version: 'v2.0.0',
+    titleVersion: 2048,
+    mediaType: 'NAND',
+    blocks: 32,
+    exefsKb: 160,
+    romfsKb: 640,
+    description: 'Local wireless DLP receiver built into CTRNAND system application partition.',
+  },
+  {
+    titleId: '0004001000021200',
+    productCode: 'CTR-N-HACE',
+    publisher: 'Nintendo',
+    shortName: 'Activity Log',
+    fullName: 'Activity Log',
+    version: 'v1.4.0',
+    titleVersion: 1040,
+    mediaType: 'NAND',
+    blocks: 36,
+    exefsKb: 144,
+    romfsKb: 768,
+    appletId: 'activity-log',
+    description: 'Reads Play Coins & software playtime logs stored in NAND_USERDATA.',
+  },
+  {
+    titleId: '0004001000021300',
+    productCode: 'CTR-N-HAEE',
+    publisher: 'Nintendo',
+    shortName: 'Health & Safety',
+    fullName: 'Health and Safety Information',
+    version: 'v1.0.2',
+    titleVersion: 1026,
+    mediaType: 'NAND',
+    blocks: 12,
+    exefsKb: 96,
+    romfsKb: 256,
+    appletId: 'health-safety',
+    description: 'Mandatory pre-install safety & stereoscopic 3D viewing notice stored on CTRNAND.',
+  },
+  {
+    titleId: '0004001000021400',
+    productCode: 'CTR-N-HAFE',
+    publisher: 'Nintendo',
+    shortName: '3DS Camera',
+    fullName: 'Nintendo 3DS Camera',
+    version: 'v1.3.0',
+    titleVersion: 3072,
+    mediaType: 'NAND',
+    blocks: 40,
+    exefsKb: 176,
+    romfsKb: 896,
+    appletId: 'camera-ar',
+    description: 'Stereoscopic camera viewfinder & AR target test applet.',
+  },
+  {
+    titleId: '0004001000021500',
+    productCode: 'CTR-N-HAGE',
+    publisher: 'Nintendo',
+    shortName: '3DS Sound',
+    fullName: 'Nintendo 3DS Sound',
+    version: 'v1.5.1',
+    titleVersion: 5120,
+    mediaType: 'NAND',
+    blocks: 58,
+    exefsKb: 208,
+    romfsKb: 1280,
+    appletId: 'sound-studio',
+    description: 'DSP audio playback studio & 8-step synthesizer.',
+  },
+  {
+    titleId: '0004001000021700',
+    productCode: 'CTR-N-HAJE',
+    publisher: 'Nintendo',
+    shortName: 'Mii Maker',
+    fullName: 'Mii Maker & Plaza',
+    version: 'v2.1.0',
+    titleVersion: 4096,
+    mediaType: 'NAND',
+    blocks: 64,
+    exefsKb: 224,
+    romfsKb: 1536,
+    appletId: 'mii-maker',
+    description: 'Create Mii characters backed by CFL_DB archive in CTRNAND & user save data.',
+  },
+  {
+    titleId: '0004001000021800',
+    productCode: 'CTR-N-HAKE',
+    publisher: 'Nintendo',
+    shortName: 'Face Raiders',
+    fullName: 'Face Raiders',
+    version: 'v1.0.0',
+    titleVersion: 1024,
+    mediaType: 'NAND',
+    blocks: 92,
+    exefsKb: 240,
+    romfsKb: 2048,
+    description: 'Built-in CTRNAND gyro/camera AR mini-game.',
+  },
+  {
+    titleId: '0004001000021900',
+    productCode: 'CTR-N-HALE',
+    publisher: 'Nintendo',
+    shortName: 'Nintendo eShop',
+    fullName: 'Nintendo eShop',
+    version: 'v11.17',
+    titleVersion: 17408,
+    mediaType: 'NAND',
+    blocks: 84,
+    exefsKb: 288,
+    romfsKb: 1792,
+    description: 'Title distribution client interacting with import.db, title.db & ticket.db.',
+  },
+  {
+    titleId: '0004003000008B02',
+    productCode: 'CTR-N-HMAE',
+    publisher: 'Nintendo',
+    shortName: 'Game Notes',
+    fullName: 'Game Notes',
+    version: 'v1.1.0',
+    titleVersion: 1024,
+    mediaType: 'NAND',
+    blocks: 24,
+    exefsKb: 112,
+    romfsKb: 512,
+    appletId: 'game-notes',
+    description: 'Resident HOME background applet for stylus memos saved in extdata.',
+  },
+  {
+    titleId: '0004003000008C02',
+    productCode: 'CTR-N-HNBE',
+    publisher: 'Nintendo',
+    shortName: 'Internet Browser',
+    fullName: 'Internet Browser',
+    version: 'v1.7.5',
+    titleVersion: 5120,
+    mediaType: 'NAND',
+    blocks: 72,
+    exefsKb: 320,
+    romfsKb: 1408,
+    appletId: 'browser',
+    description: 'System applet browser (00040030) launched suspended over active titles.',
+  },
+  {
+    titleId: '0004003000008F02',
+    productCode: 'CTR-N-HMME',
+    publisher: 'Nintendo',
+    shortName: 'HOME Menu',
+    fullName: 'Nintendo 3DS HOME Menu',
+    version: 'v11.17',
+    titleVersion: 24576,
+    mediaType: 'NAND',
+    blocks: 44,
+    exefsKb: 256,
+    romfsKb: 960,
+    description: 'Autoboot shell (0004003000008F02) launched by pm/NS on Stage 2 handoff.',
+  },
+  {
+    titleId: '0004003000009402',
+    productCode: 'CTR-N-HFRE',
+    publisher: 'Nintendo',
+    shortName: 'Friend List',
+    fullName: 'Friend List Applet',
+    version: 'v1.2.0',
+    titleVersion: 2048,
+    mediaType: 'NAND',
+    blocks: 18,
+    exefsKb: 96,
+    romfsKb: 320,
+    description: 'System Applet bound to LocalFriendCodeSeed_B in /rw/sys/.',
+  },
+  {
+    titleId: '0004003000009502',
+    productCode: 'CTR-N-HNTE',
+    publisher: 'Nintendo',
+    shortName: 'Notifications',
+    fullName: 'Notifications Applet',
+    version: 'v1.1.0',
+    titleVersion: 1024,
+    mediaType: 'NAND',
+    blocks: 16,
+    exefsKb: 88,
+    romfsKb: 288,
+    description: 'System Applet handling SpotPass and background title notices.',
+  },
+  {
+    titleId: '0004009B00010202',
+    productCode: 'CTR-N-CFL0',
+    publisher: 'Nintendo',
+    shortName: 'CFL Data Archive',
+    fullName: 'Mii Character Data Archive',
+    version: 'v1.0.0',
+    titleVersion: 1024,
+    mediaType: 'NAND',
+    blocks: 8,
+    exefsKb: 0,
+    romfsKb: 256,
+    description: 'System Data Archive (0004009B) holding shared Mii morph/feature assets.',
+  },
+  {
+    titleId: '0004009B00010402',
+    productCode: 'CTR-N-REG0',
+    publisher: 'Nintendo',
+    shortName: 'Region Manifest',
+    fullName: 'Country & Region Archive',
+    version: 'v1.0.0',
+    titleVersion: 1024,
+    mediaType: 'NAND',
+    blocks: 4,
+    exefsKb: 0,
+    romfsKb: 128,
+    description: 'System Data Archive (0004009B) containing country/timezone tables.',
+  },
+  {
+    titleId: '0004009B00014002',
+    productCode: 'CTR-N-FNT0',
+    publisher: 'Nintendo',
+    shortName: 'Shared Font Archive',
+    fullName: 'Shared System Font (CBFNT)',
+    version: 'v1.0.0',
+    titleVersion: 2048,
+    mediaType: 'NAND',
+    blocks: 14,
+    exefsKb: 0,
+    romfsKb: 512,
+    description: 'System Data Archive (0004009B) providing BCFNT bitmap fonts to applets.',
+  },
+  {
+    titleId: '000480044B513945',
+    productCode: 'TWL-N-KQ9E',
+    publisher: 'Nintendo',
+    shortName: 'DSiWare TWL Utility',
+    fullName: 'TWLN Compatibility Title',
+    version: 'v1.0.0',
+    titleVersion: 256,
+    mediaType: 'TWLN',
+    blocks: 20,
+    exefsKb: 128,
+    romfsKb: 256,
+    description: 'TWL_FIRM DSiWare title stored inside the TWLN FAT16 partition.',
+  },
+];
+
+export function buildPackageAndTicketFromBlueprint(
+  bp: RawTitleBlueprint,
+  source: TitleTicket['source'] = 'SystemPreinstalled'
+): { pkg: TitlePackage; dbEntry: TitleDatabaseEntry; ticket: TitleTicket } {
+  const titleIdHigh = bp.titleId.slice(0, 8) as TitleCategoryHigh;
+  const titleIdLow = bp.titleId.slice(8, 16);
+  const basePath =
+    bp.mediaType === 'TWLN'
+      ? `twln:/title/${titleIdHigh}/${titleIdLow}/content/`
+      : bp.mediaType === 'SD'
+      ? `sdmc:/Nintendo 3DS/<ID0>/<ID1>/title/${titleIdHigh}/${titleIdLow}/content/`
+      : bp.mediaType === 'GAMECARD'
+      ? `gamecard:/ncch/${bp.titleId}/content/`
+      : `ctrnand:/title/${titleIdHigh}/${titleIdLow}/content/`;
+
+  const mainCid = '00000000';
+  const mainAppName = `${mainCid}.app`;
+  const mainSize = (bp.exefsKb + bp.romfsKb) * 1024;
+  const apps: TitlePackage['apps'] = [
+    {
+      fileName: mainAppName,
+      magic: 'NCCH',
+      partitionId: bp.titleId,
+      programId: bp.titleId,
+      productCode: bp.productCode,
+      makerCode: bp.publisher === 'Nintendo' ? '01' : 'CT',
+      contentIndex: 0,
+      totalSizeBytes: mainSize,
+      cryptoType:
+        bp.mediaType === 'SD'
+          ? 'SD-MovableSed-AES'
+          : bp.mediaType === 'NAND'
+          ? 'CTR-NAND-Unencrypted'
+          : 'NCCH-FixedKey',
+      ...(bp.exefsKb > 0
+        ? {
+            exefs: {
+              codeSizeBytes: bp.exefsKb * 1024,
+              iconSizeBytes: 14 * 1024,
+              bannerSizeBytes: 24 * 1024,
+              hash: deterministicHex(`EXEFS:${bp.titleId}:${bp.version}`, 64),
+            },
+          }
+        : {}),
+      romfs: {
+        sizeBytes: bp.romfsKb * 1024,
+        levelCount: 3,
+        hash: deterministicHex(`ROMFS:${bp.titleId}:${bp.version}`, 64),
+      },
+    },
+  ];
+
+  const tmdContents: TitlePackage['tmd']['contents'] = [
+    {
+      contentId: mainCid,
+      index: 0,
+      type: bp.exefsKb > 0 ? 'MainContent' : 'SystemData',
+      sizeBytes: mainSize,
+      sha256: deterministicHex(`CONTENT0:${bp.titleId}:${bp.version}`, 64),
+    },
+  ];
+
+  if (bp.hasManual) {
+    const manualCid = '00000001';
+    const manualBytes = 64 * 1024;
+    apps.push({
+      fileName: `${manualCid}.app`,
+      magic: 'NCCH',
+      partitionId: bp.titleId,
+      programId: bp.titleId,
+      productCode: bp.productCode,
+      makerCode: bp.publisher === 'Nintendo' ? '01' : 'CT',
+      contentIndex: 1,
+      totalSizeBytes: manualBytes,
+      cryptoType: 'NCCH-FixedKey',
+      romfs: {
+        sizeBytes: manualBytes,
+        levelCount: 1,
+        hash: deterministicHex(`MANUAL:${bp.titleId}:${bp.version}`, 64),
+      },
+    });
+    tmdContents.push({
+      contentId: manualCid,
+      index: 1,
+      type: 'Manual',
+      sizeBytes: manualBytes,
+      sha256: deterministicHex(`CONTENT1:${bp.titleId}:${bp.version}`, 64),
+    });
+  }
+
+  const tmdFile = '00000001.tmd';
+  const totalBytes = tmdContents.reduce((sum, c) => sum + c.sizeBytes, 0);
+
+  const pkg: TitlePackage = {
+    titleId: bp.titleId,
+    titleIdHigh,
+    titleIdLow,
+    productCode: bp.productCode,
+    publisher: bp.publisher,
+    shortName: bp.shortName,
+    fullName: bp.fullName,
+    mediaType: bp.mediaType,
+    basePath,
+    appletId: bp.appletId,
+    blocks: bp.blocks,
+    description: bp.description,
+    tmd: {
+      fileName: tmdFile,
+      titleId: bp.titleId,
+      titleVersion: bp.titleVersion,
+      versionString: bp.version,
+      titleType: titleIdHigh,
+      saveDataSizeBytes: bp.appletId ? 65536 : 0,
+      sysVersion: '0004013800000002',
+      contentCount: tmdContents.length,
+      contents: tmdContents,
+      signatureIssuer: 'Root-CA00000003-CP0000000b',
+      signatureHex: deterministicHex(`TMD_SIG:${bp.titleId}:${bp.titleVersion}`, 64),
+    },
+    apps,
+  };
+
+  const dbEntry: TitleDatabaseEntry = {
+    titleId: bp.titleId,
+    titleIdHigh,
+    titleIdLow,
+    name: bp.fullName,
+    productCode: bp.productCode,
+    version: bp.version,
+    titleVersion: bp.titleVersion,
+    mediaType: bp.mediaType,
+    installPath: basePath,
+    tmdFile,
+    appFiles: apps.map((a) => a.fileName),
+    sizeBytes: totalBytes,
+    blocks: bp.blocks,
+    state: bp.stagedImport ? 'StagedImport' : 'Active',
+    launchableAppletId: bp.appletId,
+  };
+
+  const ticket: TitleTicket = {
+    ticketId: deterministicHex(`TIK_ID:${bp.titleId}`, 16),
+    titleId: bp.titleId,
+    titleIdHigh,
+    titleIdLow,
+    consoleId: bp.mediaType === 'NAND' ? '00000000' : '4A92C108',
+    encryptedTitleKeyHex: deterministicHex(`TITLEKEY:${bp.titleId}`, 32),
+    commonKeyIndex: titleIdHigh === '00040000' || titleIdHigh === '0004000E' ? 0 : 1,
+    version: 1,
+    issuer: 'Root-CA00000003-XS0000000c',
+    source: bp.mediaType === 'GAMECARD' ? 'NintendoSigned' : source,
+    signatureHex: deterministicHex(`TIK_SIG:${bp.titleId}`, 64),
+    rightsMask: '0x00000003',
+  };
+
+  return { pkg, dbEntry, ticket };
+}
+
+export function getDefaultCertsDb(): CertChainEntry[] {
+  return [
+    {
+      name: 'Root',
+      issuer: 'Nintendo Root CA',
+      keyType: 'RSA-4096',
+      fingerprintSha256: deterministicHex('CERT_ROOT', 32),
+    },
+    {
+      name: 'CA00000003',
+      issuer: 'Root',
+      keyType: 'RSA-2048',
+      fingerprintSha256: deterministicHex('CERT_CA3', 32),
+    },
+    {
+      name: 'XS0000000c',
+      issuer: 'Root-CA00000003',
+      keyType: 'RSA-2048',
+      fingerprintSha256: deterministicHex('CERT_XS0C', 32),
+    },
+    {
+      name: 'CP0000000b',
+      issuer: 'Root-CA00000003',
+      keyType: 'RSA-2048',
+      fingerprintSha256: deterministicHex('CERT_CP0B', 32),
+    },
+  ];
+}
+
+export function getDefaultCtrNandArchive(titles = getDefaultSystemTitles()): CtrNandArchiveData {
+  const packages: TitlePackage[] = [];
+  const titleDb: TitleDatabaseEntry[] = [];
+  const importDb: TitleDatabaseEntry[] = [];
+  const ticketDb: TitleTicket[] = [];
+
+  for (const bp of CTR_TITLE_BLUEPRINTS) {
+    const built = buildPackageAndTicketFromBlueprint(bp);
+    packages.push(built.pkg);
+    if (bp.stagedImport) {
+      importDb.push(built.dbEntry);
+    } else {
+      titleDb.push(built.dbEntry);
+      ticketDb.push(built.ticket);
+    }
+  }
+
+  return {
+    homeMenuTitleId: '0004003000008F02',
+    sharedFontHash: '7a9e31c4f02b',
+    titles,
+    packages,
+    dbs: {
+      titleDb,
+      importDb,
+      ticketDb,
+      certsDb: getDefaultCertsDb(),
+    },
+    nandFsMeta: {
+      ctrnandDirs: ['/title/', '/dbs/', '/data/<ID0>/', '/rw/sys/', '/private/'],
+      twlnDirs: ['/title/', '/shared1/', '/shared2/', '/sys/'],
+      twlpDirs: ['/photo/', '/sound/'],
+      agbsaveMagic: '.AGB',
+    },
+  };
+}
+
 export function getDefaultUserSaveData(): UserSaveData {
   return {
     slots: [
@@ -193,9 +756,9 @@ export function getDefaultUserSaveData(): UserSaveData {
       { type: 'app', appletId: 'system-settings' },
       { type: 'app', appletId: 'activity-log' },
       { type: 'app', appletId: 'game-notes' },
-      { type: 'app', appletId: 'nand-tool' },
       { type: 'app', appletId: 'browser' },
       { type: 'folder', folderId: 'fld-sys' },
+      { type: 'empty' },
       { type: 'empty' },
       { type: 'empty' },
       { type: 'empty' },
@@ -210,7 +773,7 @@ export function getDefaultUserSaveData(): UserSaveData {
         name: 'System Utilities',
         badgeChar: 'U',
         color: '#0284c7',
-        items: ['nand-tool', 'system-settings', 'browser'],
+        items: ['system-settings', 'browser'],
       },
     },
     notes: [
@@ -245,7 +808,6 @@ export function getDefaultUserSaveData(): UserSaveData {
     ],
     activity: {
       'system-settings': { appletId: 'system-settings', launchCount: 2, totalSeconds: 185, lastPlayed: '2026-11-15' },
-      'nand-tool': { appletId: 'nand-tool', launchCount: 1, totalSeconds: 94, lastPlayed: '2026-11-15' },
       'sound-studio': { appletId: 'sound-studio', launchCount: 1, totalSeconds: 62, lastPlayed: '2026-11-15' },
     },
     miis: [
@@ -282,6 +844,8 @@ export function getDefaultUserSaveData(): UserSaveData {
     ],
     synthPattern: [0, 2, 4, 7, 4, 2, 5, 7],
     cartridgeHighScore: 420,
+    sysdataArchives: ['00010017 (HOME)', '00010022 (Activity)', '00010026 (CECD)'],
+    extdataArchives: ['0000008f (HOME Cache)', '00000217 (Mii Plaza)', '00000000 (Notes)'],
   };
 }
 
@@ -399,7 +963,7 @@ export function parseTaggedBinary<T>(buf: Uint8Array, expectedMagic: string): { 
 
 export function buildFirm0Partition(opcodes = getDefaultStage1Opcodes()): Uint8Array {
   const size = getPartitionByteSize('firm0_boot1');
-  const buf = buildTaggedBinary(
+  return buildTaggedBinary(
     'FIRM',
     size,
     {
@@ -410,8 +974,6 @@ export function buildFirm0Partition(opcodes = getDefaultStage1Opcodes()): Uint8A
     },
     101
   );
-  writeAsciiFixed(buf, 0x1800, 'FIRM_RSA2048_SIG\0ARM9_KERNEL9_08006000\0ARM11_KERNEL11_1FF80000', 80);
-  return buf;
 }
 
 export function parseFirm0Partition(buf: Uint8Array) {
@@ -425,14 +987,7 @@ export function parseFirm0Partition(buf: Uint8Array) {
 
 export function buildFirm1Partition(header = getDefaultStage2Header()): Uint8Array {
   const size = getPartitionByteSize('firm1_stage2');
-  const buf = buildTaggedBinary('STG2', size, header, 202);
-  writeAsciiFixed(
-    buf,
-    0x2000,
-    'KERNEL9_OTP_LOCK_PROCESS9\0KERNEL11_PM_SM_FS_PXI\0NS_ERRDISP_HOME_0004003000008F02',
-    96
-  );
-  return buf;
+  return buildTaggedBinary('STG2', size, header, 202);
 }
 
 export function parseFirm1Partition(buf: Uint8Array) {
@@ -446,34 +1001,42 @@ export function buildSysDataPartition(config = getDefaultSystemConfig()): Uint8A
 
 export function parseSysDataPartition(buf: Uint8Array) {
   const parsed = parseTaggedBinary<SystemConfig>(buf, 'CFG0');
-  if (parsed.ok && !parsed.data.language) {
-    parsed.data.language = 'en';
+  if (parsed.ok) {
+    if (!parsed.data.language) parsed.data.language = 'en';
+    if (!parsed.data.identity) {
+      parsed.data.identity = getDefaultConsoleIdentity(parsed.data.region, parsed.data.serialNumber);
+    } else {
+      parsed.data.identity.secureInfoRegionByte = parsed.data.region;
+      parsed.data.identity.secureInfoSerial = parsed.data.serialNumber;
+    }
   }
   return parsed;
 }
 
-export function buildCtrNandPartition(titles = getDefaultSystemTitles()): Uint8Array {
+export function buildCtrNandPartition(
+  archive: CtrNandArchiveData = getDefaultCtrNandArchive()
+): Uint8Array {
   const size = getPartitionByteSize('ctrnand_sys');
-  const buf = buildTaggedBinary(
-    'CND0',
-    size,
-    {
-      homeMenuTitleId: '0004003000008F02',
-      sharedFontHash: '7a9e31c4f02b',
-      titles,
-    },
-    404
-  );
-  writeAsciiFixed(buf, 0x4000, 'CTR_HOME_MENU_ROMFS\0SHARED_FONT_CBFNT\0APPLET_BANNER_ARCHIVE', 64);
-  return buf;
+  return buildTaggedBinary('CND0', size, archive, 404);
 }
 
 export function parseCtrNandPartition(buf: Uint8Array) {
-  return parseTaggedBinary<{
-    homeMenuTitleId: string;
-    sharedFontHash: string;
-    titles: SystemTitleEntry[];
-  }>(buf, 'CND0');
+  const parsed = parseTaggedBinary<CtrNandArchiveData>(buf, 'CND0');
+  if (parsed.ok) {
+    parsed.data.titles = (parsed.data.titles ?? []).filter(
+      (t) => (t.appletId as string) !== 'nand-tool'
+    );
+    // Auto-hydrate older v2 CTRNAND payloads lacking full packages/dbs
+    if (!parsed.data.packages || !parsed.data.dbs || !parsed.data.nandFsMeta) {
+      const defaults = getDefaultCtrNandArchive(
+        parsed.data.titles.length > 0 ? parsed.data.titles : getDefaultSystemTitles()
+      );
+      parsed.data.packages = parsed.data.packages ?? defaults.packages;
+      parsed.data.dbs = parsed.data.dbs ?? defaults.dbs;
+      parsed.data.nandFsMeta = parsed.data.nandFsMeta ?? defaults.nandFsMeta;
+    }
+  }
+  return parsed;
 }
 
 export function buildUserDataPartition(saveData = getDefaultUserSaveData()): Uint8Array {
@@ -482,7 +1045,24 @@ export function buildUserDataPartition(saveData = getDefaultUserSaveData()): Uin
 }
 
 export function parseUserDataPartition(buf: Uint8Array) {
-  return parseTaggedBinary<UserSaveData>(buf, 'USR0');
+  const parsed = parseTaggedBinary<UserSaveData>(buf, 'USR0');
+  if (parsed.ok) {
+    // Strip legacy nand-tool references from previously formatted IndexedDB saves
+    parsed.data.slots = parsed.data.slots.map((slot) =>
+      slot.type === 'app' && (slot.appletId as string) === 'nand-tool' ? { type: 'empty' } : slot
+    );
+    for (const folder of Object.values(parsed.data.folders)) {
+      folder.items = folder.items.filter((id) => (id as string) !== 'nand-tool');
+    }
+    delete parsed.data.activity['nand-tool'];
+    if (!parsed.data.sysdataArchives) {
+      parsed.data.sysdataArchives = ['00010017 (HOME)', '00010022 (Activity)', '00010026 (CECD)'];
+    }
+    if (!parsed.data.extdataArchives) {
+      parsed.data.extdataArchives = ['0000008f (HOME Cache)', '00000217 (Mii Plaza)', '00000000 (Notes)'];
+    }
+  }
+  return parsed;
 }
 
 export interface NcsdPartitionRecord {

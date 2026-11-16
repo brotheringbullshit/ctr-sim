@@ -61,3 +61,16 @@
   display: none;
 }
 
+@keyframes ctr-tile-drift {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-44px, 0, 0);
+  }
+}
+
+.ctr-tile-drift {
+  animation: ctr-tile-drift 3.14s linear infinite;
+  will-change: transform;
+}

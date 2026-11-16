@@ -3,7 +3,6 @@ import * as THREE from 'three';
 export interface BannerTextureSet {
   earthMap: THREE.CanvasTexture;
   earthGridBump: THREE.CanvasTexture;
-  nandChipLabel: THREE.CanvasTexture;
   notepadLines: THREE.CanvasTexture;
   starGridFloor: THREE.CanvasTexture;
   contactShadow: THREE.CanvasTexture;
@@ -97,34 +96,7 @@ export function createBannerTextureSet(maxAnisotropy: number): BannerTextureSet 
   });
   const earthGridBump = registerDataTex(bumpCanvas);
 
-  // 2. CTR-NAND Silicon Chip Label Texture
-  const [chipCanvas, cctx] = makeCanvas(512, 256);
-  cctx.fillStyle = '#0f172a';
-  cctx.fillRect(0, 0, 512, 256);
-  cctx.strokeStyle = '#38bdf8';
-  cctx.lineWidth = 6;
-  cctx.strokeRect(14, 14, 484, 228);
-  cctx.strokeStyle = '#1e293b';
-  cctx.lineWidth = 2;
-  for (let i = 36; i < 480; i += 28) {
-    cctx.beginPath();
-    cctx.moveTo(i, 18);
-    cctx.lineTo(i, 40);
-    cctx.moveTo(i, 216);
-    cctx.lineTo(i, 238);
-    cctx.stroke();
-  }
-  cctx.fillStyle = '#34d399';
-  cctx.font = 'bold 54px monospace';
-  cctx.textAlign = 'center';
-  cctx.textBaseline = 'middle';
-  cctx.fillText('CTR-NAND', 256, 102);
-  cctx.fillStyle = '#93c5fd';
-  cctx.font = 'bold 28px monospace';
-  cctx.fillText('AES-128-CTR · 256x16K', 256, 166);
-  const nandChipLabel = registerColorTex(chipCanvas);
-
-  // 3. Game Notes Ruled Paper & Sketch Texture
+  // 2. Game Notes Ruled Paper & Sketch Texture
   const [noteCanvas, nctx] = makeCanvas(512, 512);
   nctx.fillStyle = '#fffbeb';
   nctx.fillRect(0, 0, 512, 512);
@@ -210,8 +182,13 @@ export function createBannerTextureSet(maxAnisotropy: number): BannerTextureSet 
   coctx.fillText('C', 128, 136);
   const coinEmblem = registerColorTex(coinCanvas);
 
-  // Dynamic helpers for text plaques
+  // Dynamic cached helpers for text plaques (prevents GPU texture leaks across selections)
+  const dynamicTexCache = new Map<string, THREE.CanvasTexture>();
+
   const miiWordmarkTexture = (text: string, color: string) => {
+    const key = `mii:${text}:${color}`;
+    const cached = dynamicTexCache.get(key);
+    if (cached) return cached;
     const [c, ctx] = makeCanvas(256, 256);
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, 256, 256);
@@ -220,10 +197,16 @@ export function createBannerTextureSet(maxAnisotropy: number): BannerTextureSet 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, 128, 138);
-    return registerColorTex(c);
+    const tex = registerColorTex(c);
+    dynamicTexCache.set(key, tex);
+    return tex;
   };
 
   const folderBadgeTexture = (char: string, color: string) => {
+    const letter = char.slice(0, 1).toUpperCase() || 'F';
+    const key = `fld:${letter}:${color}`;
+    const cached = dynamicTexCache.get(key);
+    if (cached) return cached;
     const [c, ctx] = makeCanvas(256, 256);
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, 256, 256);
@@ -234,14 +217,15 @@ export function createBannerTextureSet(maxAnisotropy: number): BannerTextureSet 
     ctx.font = 'bold 148px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(char.slice(0, 1).toUpperCase() || 'F', 128, 134);
-    return registerColorTex(c);
+    ctx.fillText(letter, 128, 134);
+    const tex = registerColorTex(c);
+    dynamicTexCache.set(key, tex);
+    return tex;
   };
 
   return {
     earthMap,
     earthGridBump,
-    nandChipLabel,
     notepadLines,
     starGridFloor,
     contactShadow,
@@ -249,6 +233,7 @@ export function createBannerTextureSet(maxAnisotropy: number): BannerTextureSet 
     folderBadgeTexture,
     coinEmblem,
     dispose: () => {
+      dynamicTexCache.clear();
       created.forEach((t) => t.dispose());
     },
   };

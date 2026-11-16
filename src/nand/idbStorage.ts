@@ -1,12 +1,12 @@
 import {
   CHUNK_SIZE,
   ChunkIOEvent,
+  CtrNandArchiveData,
   NAND_PARTITIONS,
   PartitionId,
   TOTAL_CHUNKS,
   SystemConfig,
   UserSaveData,
-  BootStage2Header,
 } from './types';
 import {
   buildCtrNandPartition,
@@ -20,11 +20,10 @@ import {
   getDefaultStage1Opcodes,
   getDefaultStage2Header,
   getDefaultSystemConfig,
-  getDefaultSystemTitles,
+  getDefaultCtrNandArchive,
   getDefaultUserSaveData,
 } from './payloads';
 import {
-  CTR_KEYSLOTS,
   computeSHA256Hex,
   decryptPartition,
   encryptPartition,
@@ -56,24 +55,8 @@ export function getPartitionForChunk(chunkIndex: number): PartitionId {
 class NandIDBDriver {
   private dbPromise: Promise<IDBDatabase> | null = null;
   private listeners = new Set<IOListener>();
-  private verbose = true;
-  private recentIOEvents: ChunkIOEvent[] = [];
-
-  setVerboseLogging(enabled: boolean): void {
-    this.verbose = enabled;
-  }
-
-  isVerbose(): boolean {
-    return this.verbose;
-  }
-
-  getRecentIOEvents(): ChunkIOEvent[] {
-    return [...this.recentIOEvents];
-  }
-
-  clearRecentIO(): void {
-    this.recentIOEvents = [];
-  }
+  // Serialized async write queue to prevent concurrent save races against NCSD digests
+  private writeQueue: Promise<void> = Promise.resolve();
 
   subscribeIO(listener: IOListener): () => void {
     this.listeners.add(listener);
@@ -82,46 +65,24 @@ class NandIDBDriver {
     };
   }
 
-  private emitIO(chunkIndex: number, op: 'read' | 'write' | 'corrupt', details?: string): void {
+  private emitIO(chunkIndex: number, op: 'read' | 'write' | 'corrupt'): void {
     const partitionId = getPartitionForChunk(chunkIndex);
-    const spec = NAND_PARTITIONS.find((p) => p.id === partitionId);
-    const keyslot = partitionId === 'ncsd_hdr' ? 'RSA-2048' : CTR_KEYSLOTS[partitionId]?.slotHex;
-    const startHex = '0x' + (chunkIndex * CHUNK_SIZE).toString(16).padStart(6, '0').toUpperCase();
-    const endHex = '0x' + ((chunkIndex + 1) * CHUNK_SIZE - 1).toString(16).padStart(6, '0').toUpperCase();
-
     const event: ChunkIOEvent = {
       chunkIndex,
       op,
       partitionId,
       timestamp: performance.now(),
-      byteOffset: chunkIndex * CHUNK_SIZE,
-      byteLength: CHUNK_SIZE,
-      keyslot,
-      details,
     };
-
-    this.recentIOEvents.push(event);
-    if (this.recentIOEvents.length > 150) {
-      this.recentIOEvents.shift();
-    }
-
     this.listeners.forEach((fn) => fn(event));
+  }
 
-    if (this.verbose) {
-      const opStyles: Record<'read' | 'write' | 'corrupt', string> = {
-        read: 'color: #38bdf8; font-weight: bold;',
-        write: 'color: #34d399; font-weight: bold;',
-        corrupt: 'color: #f87171; font-weight: bold;',
-      };
-      console.log(
-        `%c[CTR-NAND] %c${event.op.toUpperCase().padEnd(7)} %cChunk #${String(chunkIndex).padStart(3, '0')} (${startHex}..${endHex}) %c${(spec?.name ?? partitionId).padEnd(14)} %c[${keyslot ? 'Keyslot ' + keyslot : 'Sector 0'}]${details ? ' · ' + details : ''}`,
-        'color: #94a3b8; font-weight: bold; font-family: monospace;',
-        opStyles[event.op] + ' font-family: monospace;',
-        'color: #cbd5e1; font-family: monospace;',
-        'color: #a78bfa; font-weight: 600; font-family: monospace;',
-        'color: #fbbf24; font-family: monospace;'
-      );
-    }
+  private enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.writeQueue.then(task, task);
+    this.writeQueue = next.then(
+      () => undefined,
+      () => undefined
+    );
+    return next;
   }
 
   private openDB(): Promise<IDBDatabase> {
@@ -183,66 +144,33 @@ class NandIDBDriver {
     });
   }
 
-  async writeChunk(chunkIndex: number, data: Uint8Array, op: 'write' | 'corrupt' = 'write'): Promise<void> {
-    if (data.byteLength !== CHUNK_SIZE) {
-      throw new Error(`Chunk ${chunkIndex} must be exactly ${CHUNK_SIZE} bytes`);
-    }
-    const db = await this.openDB();
-    const record: StoredChunkRecord = {
-      chunkIndex,
-      partitionId: getPartitionForChunk(chunkIndex),
-      data: new Uint8Array(data),
-      updatedAt: Date.now(),
-    };
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_CHUNKS, 'readwrite');
-      tx.objectStore(STORE_CHUNKS).put(record);
-      tx.oncomplete = () => {
-        this.emitIO(chunkIndex, op);
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error);
-    });
-  }
-
-  async readPartition(id: PartitionId, stepDelayMs = 0): Promise<Uint8Array> {
+  async readPartition(id: PartitionId): Promise<Uint8Array> {
     const spec = NAND_PARTITIONS.find((p) => p.id === id);
     if (!spec) throw new Error(`Unknown partition: ${id}`);
     const chunkCount = spec.endChunk - spec.startChunk + 1;
     const out = new Uint8Array(chunkCount * CHUNK_SIZE);
 
-    for (let i = 0; i < chunkCount; i++) {
-      const chunkIdx = spec.startChunk + i;
-      const chunkBytes = await this.readChunk(chunkIdx);
-      out.set(chunkBytes, i * CHUNK_SIZE);
-      if (stepDelayMs > 0 && i % 4 === 0) {
-        await new Promise((r) => setTimeout(r, stepDelayMs));
-      }
+    const db = await this.openDB();
+    const records = await new Promise<StoredChunkRecord[]>((resolve, reject) => {
+      const tx = db.transaction(STORE_CHUNKS, 'readonly');
+      const store = tx.objectStore(STORE_CHUNKS);
+      const req = store.getAll(IDBKeyRange.bound(spec.startChunk, spec.endChunk));
+      req.onsuccess = () => resolve((req.result as StoredChunkRecord[]) ?? []);
+      req.onerror = () => reject(req.error);
+    });
+
+    if (records.length !== chunkCount) {
+      throw new Error(`Missing NAND chunks for ${id} (expected ${chunkCount}, got ${records.length})`);
     }
+
+    for (const rec of records) {
+      const relIdx = rec.chunkIndex - spec.startChunk;
+      const bytes = rec.data instanceof Uint8Array ? rec.data : new Uint8Array(rec.data);
+      out.set(bytes, relIdx * CHUNK_SIZE);
+      this.emitIO(rec.chunkIndex, 'read');
+    }
+
     return out;
-  }
-
-  /**
-   * Reads a partition from raw IDB chunks and decrypts it with the partition's hardware AES-128-CTR keyslot.
-   */
-  async readDecryptedPartition(id: PartitionId, stepDelayMs = 0): Promise<Uint8Array> {
-    const ciphertext = await this.readPartition(id, stepDelayMs);
-    if (id === 'ncsd_hdr') return ciphertext;
-    return decryptPartition(id, ciphertext);
-  }
-
-  /**
-   * Reads a single 16KB chunk and decrypts it into memory using the partition's AES-CTR key and counter.
-   */
-  async readDecryptedChunk(chunkIndex: number): Promise<Uint8Array> {
-    const partId = getPartitionForChunk(chunkIndex);
-    if (partId === 'ncsd_hdr') {
-      return this.readChunk(chunkIndex);
-    }
-    const spec = NAND_PARTITIONS.find((p) => p.id === partId)!;
-    const fullDecrypted = await this.readDecryptedPartition(partId);
-    const offsetInPart = (chunkIndex - spec.startChunk) * CHUNK_SIZE;
-    return fullDecrypted.slice(offsetInPart, offsetInPart + CHUNK_SIZE);
   }
 
   async writePartitionRaw(id: PartitionId, buffer: Uint8Array): Promise<void> {
@@ -332,251 +260,147 @@ class NandIDBDriver {
   /**
    * Encrypts and saves SystemConfig to TWL_SYSDATA (Keyslot 0x16) in IndexedDB.
    */
-  async saveSystemConfig(config: SystemConfig): Promise<void> {
-    const plaintext = buildSysDataPartition(config);
-    const ciphertext = await encryptPartition('twl_sysdata', plaintext);
-    await this.writePartitionRaw('twl_sysdata', ciphertext);
-    await this.syncNcsdDigests('twl_sysdata', ciphertext);
+  saveSystemConfig(config: SystemConfig): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const plaintext = buildSysDataPartition(config);
+      const ciphertext = await encryptPartition('twl_sysdata', plaintext);
+      await this.writePartitionRaw('twl_sysdata', ciphertext);
+      await this.syncNcsdDigests('twl_sysdata', ciphertext);
+    });
   }
 
   /**
    * Encrypts and saves UserSaveData to NAND_USERDATA (Keyslot 0x3D) in IndexedDB.
    */
-  async saveUserData(userData: UserSaveData): Promise<void> {
-    const plaintext = buildUserDataPartition(userData);
-    const ciphertext = await encryptPartition('nand_userdata', plaintext);
-    await this.writePartitionRaw('nand_userdata', ciphertext);
-    await this.syncNcsdDigests('nand_userdata', ciphertext);
+  saveUserData(userData: UserSaveData): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const plaintext = buildUserDataPartition(userData);
+      const ciphertext = await encryptPartition('nand_userdata', plaintext);
+      await this.writePartitionRaw('nand_userdata', ciphertext);
+      await this.syncNcsdDigests('nand_userdata', ciphertext);
+    });
   }
 
   /**
-   * Encrypts and saves Stage2 header to FIRM1_STAGE2 (Keyslot 0x11) in IndexedDB.
+   * Encrypts and saves CTRNAND title.db, import.db, ticket.db, and packages to CTRNAND_SYS (Keyslot 0x25).
    */
-  async saveStage2Header(header: BootStage2Header): Promise<void> {
-    const plaintext = buildFirm1Partition(header);
-    const ciphertext = await encryptPartition('firm1_stage2', plaintext);
-    await this.writePartitionRaw('firm1_stage2', ciphertext);
-    await this.syncNcsdDigests('firm1_stage2', ciphertext);
+  saveCtrNandArchive(archive: CtrNandArchiveData): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const plaintext = buildCtrNandPartition(archive);
+      const ciphertext = await encryptPartition('ctrnand_sys', plaintext);
+      await this.writePartitionRaw('ctrnand_sys', ciphertext);
+      await this.syncNcsdDigests('ctrnand_sys', ciphertext);
+    });
   }
 
   /**
    * Formats and provisions all 256 chunks into IndexedDB with real AES-128-CTR encrypted partitions and RSA-2048 signed NCSD header.
    */
-  async provisionFreshNand(
-    onProgress?: (writtenChunks: number, totalChunks: number, label: string) => void
-  ): Promise<void> {
-    // 1. Build plaintext partition binaries
-    const rawFirm0 = buildFirm0Partition(getDefaultStage1Opcodes());
-    const rawFirm1 = buildFirm1Partition(getDefaultStage2Header());
-    const rawSysdata = buildSysDataPartition(getDefaultSystemConfig());
-    const rawCtrnand = buildCtrNandPartition(getDefaultSystemTitles());
-    const rawUserdata = buildUserDataPartition(getDefaultUserSaveData());
+  provisionFreshNand(): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const rawFirm0 = buildFirm0Partition(getDefaultStage1Opcodes());
+      const rawFirm1 = buildFirm1Partition(getDefaultStage2Header());
+      const rawSysdata = buildSysDataPartition(getDefaultSystemConfig());
+      const rawCtrnand = buildCtrNandPartition(getDefaultCtrNandArchive());
+      const rawUserdata = buildUserDataPartition(getDefaultUserSaveData());
 
-    // 2. Encrypt each partition with its respective 3DS hardware AES-128-CTR keyslot
-    const [encFirm0, encFirm1, encSysdata, encCtrnand, encUserdata] = await Promise.all([
-      encryptPartition('firm0_boot1', rawFirm0),
-      encryptPartition('firm1_stage2', rawFirm1),
-      encryptPartition('twl_sysdata', rawSysdata),
-      encryptPartition('ctrnand_sys', rawCtrnand),
-      encryptPartition('nand_userdata', rawUserdata),
-    ]);
+      const [encFirm0, encFirm1, encSysdata, encCtrnand, encUserdata] = await Promise.all([
+        encryptPartition('firm0_boot1', rawFirm0),
+        encryptPartition('firm1_stage2', rawFirm1),
+        encryptPartition('twl_sysdata', rawSysdata),
+        encryptPartition('ctrnand_sys', rawCtrnand),
+        encryptPartition('nand_userdata', rawUserdata),
+      ]);
 
-    // 3. Build NCSD Master Header in Sector 0 (stores SHA-256 of encrypted partitions and RSA-2048 signs table)
-    const ncsd = await buildNcsdHeader({
-      firm0_boot1: encFirm0,
-      firm1_stage2: encFirm1,
-      twl_sysdata: encSysdata,
-      ctrnand_sys: encCtrnand,
-      nand_userdata: encUserdata,
-    });
+      const ncsd = await buildNcsdHeader({
+        firm0_boot1: encFirm0,
+        firm1_stage2: encFirm1,
+        twl_sysdata: encSysdata,
+        ctrnand_sys: encCtrnand,
+        nand_userdata: encUserdata,
+      });
 
-    const partitionMap: Record<PartitionId, Uint8Array> = {
-      ncsd_hdr: ncsd,
-      firm0_boot1: encFirm0,
-      firm1_stage2: encFirm1,
-      twl_sysdata: encSysdata,
-      ctrnand_sys: encCtrnand,
-      nand_userdata: encUserdata,
-    };
+      const partitionMap: Record<PartitionId, Uint8Array> = {
+        ncsd_hdr: ncsd,
+        firm0_boot1: encFirm0,
+        firm1_stage2: encFirm1,
+        twl_sysdata: encSysdata,
+        ctrnand_sys: encCtrnand,
+        nand_userdata: encUserdata,
+      };
 
-    const db = await this.openDB();
-    let written = 0;
-
-    for (const spec of NAND_PARTITIONS) {
-      const buf = partitionMap[spec.id];
-      const count = spec.endChunk - spec.startChunk + 1;
+      const db = await this.openDB();
 
       await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE_CHUNKS, 'readwrite');
+        const tx = db.transaction([STORE_CHUNKS, STORE_META], 'readwrite');
         const store = tx.objectStore(STORE_CHUNKS);
-        for (let i = 0; i < count; i++) {
-          const chunkIdx = spec.startChunk + i;
-          store.put({
-            chunkIndex: chunkIdx,
-            partitionId: spec.id,
-            data: buf.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
-            updatedAt: Date.now(),
-          } satisfies StoredChunkRecord);
-        }
-        tx.oncomplete = () => {
+        for (const spec of NAND_PARTITIONS) {
+          const buf = partitionMap[spec.id];
+          const count = spec.endChunk - spec.startChunk + 1;
           for (let i = 0; i < count; i++) {
-            this.emitIO(spec.startChunk + i, 'write');
+            const chunkIdx = spec.startChunk + i;
+            store.put({
+              chunkIndex: chunkIdx,
+              partitionId: spec.id,
+              data: buf.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
+              updatedAt: Date.now(),
+            } satisfies StoredChunkRecord);
+          }
+        }
+        tx.objectStore(STORE_META).put({
+          key: 'provisioned',
+          value: true,
+          cryptoVersion: 2,
+          cipher: 'AES-128-CTR',
+          signature: 'RSASSA-PKCS1-v1_5',
+          formattedAt: Date.now(),
+        });
+        tx.oncomplete = () => {
+          for (let i = 0; i < TOTAL_CHUNKS; i++) {
+            this.emitIO(i, 'write');
           }
           resolve();
         };
         tx.onerror = () => reject(tx.error);
       });
-
-      written += count;
-      onProgress?.(written, TOTAL_CHUNKS, `${spec.name} (${spec.mountPoint}) [AES-128-CTR Encrypted]`);
-      await new Promise((r) => setTimeout(r, 45));
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_META, 'readwrite');
-      tx.objectStore(STORE_META).put({
-        key: 'provisioned',
-        value: true,
-        cryptoVersion: 2,
-        cipher: 'AES-128-CTR',
-        signature: 'RSASSA-PKCS1-v1_5',
-        formattedAt: Date.now(),
-      });
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
     });
   }
 
-  async corruptPartition(id: PartitionId): Promise<{ chunkIndex: number; offset: number }> {
-    const spec = NAND_PARTITIONS.find((p) => p.id === id)!;
-    const chunk = await this.readChunk(spec.startChunk);
-    const corrupted = new Uint8Array(chunk);
-
-    if (id === 'ncsd_hdr') {
-      // Corrupt RSA signature or magic at 0x100
-      corrupted[0x20] ^= 0xff; // Invalidate RSA signature block
-      corrupted[0x100] = 0xde;
-      corrupted[0x101] = 0xad;
-      await this.writeChunk(spec.startChunk, corrupted, 'corrupt');
-      return { chunkIndex: spec.startChunk, offset: 0x100 };
-    }
-
-    // Corrupt ciphertext in flash memory
-    corrupted[0x04] ^= 0x5a;
-    corrupted[0x20] ^= 0xff;
-    corrupted[0x21] ^= 0xaa;
-    await this.writeChunk(spec.startChunk, corrupted, 'corrupt');
-    return { chunkIndex: spec.startChunk, offset: 0x00 };
-  }
-
-  async corruptChunk(chunkIndex: number, offset = 0x20): Promise<void> {
-    const chunk = await this.readChunk(chunkIndex);
-    const corrupted = new Uint8Array(chunk);
-    corrupted[offset % corrupted.length] ^= 0xff;
-    await this.writeChunk(chunkIndex, corrupted, 'corrupt');
-  }
-
-  async repairPartition(id: PartitionId): Promise<void> {
-    if (id === 'ncsd_hdr') {
-      await this.syncNcsdDigests();
-      return;
-    }
-    let rawPlaintext: Uint8Array;
-    switch (id) {
-      case 'firm0_boot1':
-        rawPlaintext = buildFirm0Partition(getDefaultStage1Opcodes());
-        break;
-      case 'firm1_stage2':
-        rawPlaintext = buildFirm1Partition(getDefaultStage2Header());
-        break;
-      case 'twl_sysdata':
-        rawPlaintext = buildSysDataPartition(getDefaultSystemConfig());
-        break;
-      case 'ctrnand_sys':
-        rawPlaintext = buildCtrNandPartition(getDefaultSystemTitles());
-        break;
-      case 'nand_userdata':
-        rawPlaintext = buildUserDataPartition(getDefaultUserSaveData());
-        break;
-    }
-    const ciphertext = await encryptPartition(id, rawPlaintext);
-    await this.writePartitionRaw(id, ciphertext);
-    await this.syncNcsdDigests(id, ciphertext);
-  }
-
-  async exportFullNandBin(): Promise<Uint8Array> {
-    const out = new Uint8Array(TOTAL_CHUNKS * CHUNK_SIZE);
-    for (let i = 0; i < TOTAL_CHUNKS; i++) {
-      const chunk = await this.readChunk(i);
-      out.set(chunk, i * CHUNK_SIZE);
-    }
-    return out;
-  }
-
-  async importFullNandBin(data: Uint8Array): Promise<void> {
-    const expectedBytes = TOTAL_CHUNKS * CHUNK_SIZE;
-    if (data.byteLength !== expectedBytes) {
-      throw new Error(
-        `Invalid NAND .bin size: expected ${expectedBytes.toLocaleString()} bytes (4.00 MB), got ${data.byteLength.toLocaleString()} bytes.`
-      );
-    }
-    const db = await this.openDB();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([STORE_CHUNKS, STORE_META], 'readwrite');
-      const chunkStore = tx.objectStore(STORE_CHUNKS);
-      for (let i = 0; i < TOTAL_CHUNKS; i++) {
-        const slice = data.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        chunkStore.put({
-          chunkIndex: i,
-          partitionId: getPartitionForChunk(i),
-          data: slice,
-          updatedAt: Date.now(),
-        } satisfies StoredChunkRecord);
+  repairPartition(id: PartitionId): Promise<void> {
+    return this.enqueueWrite(async () => {
+      if (id === 'ncsd_hdr') {
+        await this.syncNcsdDigests();
+        return;
       }
-      tx.objectStore(STORE_META).put({
-        key: 'provisioned',
-        value: true,
-        cryptoVersion: 2,
-        cipher: 'AES-128-CTR',
-        restoredAt: Date.now(),
-      });
-      tx.oncomplete = () => {
-        for (let i = 0; i < TOTAL_CHUNKS; i++) {
-          this.emitIO(i, 'write');
-        }
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error);
+      let rawPlaintext: Uint8Array;
+      switch (id) {
+        case 'firm0_boot1':
+          rawPlaintext = buildFirm0Partition(getDefaultStage1Opcodes());
+          break;
+        case 'firm1_stage2':
+          rawPlaintext = buildFirm1Partition(getDefaultStage2Header());
+          break;
+        case 'twl_sysdata':
+          rawPlaintext = buildSysDataPartition(getDefaultSystemConfig());
+          break;
+        case 'ctrnand_sys':
+          rawPlaintext = buildCtrNandPartition(getDefaultCtrNandArchive());
+          break;
+        case 'nand_userdata':
+          rawPlaintext = buildUserDataPartition(getDefaultUserSaveData());
+          break;
+      }
+      const ciphertext = await encryptPartition(id, rawPlaintext);
+      await this.writePartitionRaw(id, ciphertext);
+      await this.syncNcsdDigests(id, ciphertext);
     });
+  }
+
+  async readDecryptedPartition(id: PartitionId): Promise<Uint8Array> {
+    const ciphertext = await this.readPartition(id);
+    if (id === 'ncsd_hdr') return ciphertext;
+    return decryptPartition(id, ciphertext);
   }
 }
 
 export const nandDriver = new NandIDBDriver();
-
-declare global {
-  interface Window {
-    ctrNand?: {
-      driver: NandIDBDriver;
-      getRecentIO: () => ChunkIOEvent[];
-      clearRecentIO: () => void;
-      setVerbose: (enabled: boolean) => void;
-      isVerbose: () => boolean;
-      readChunk: (chunkIndex: number) => Promise<Uint8Array>;
-      writeChunk: (chunkIndex: number, data: Uint8Array) => Promise<void>;
-      corruptChunk: (chunkIndex: number) => Promise<void>;
-    };
-  }
-}
-
-if (typeof window !== 'undefined') {
-  window.ctrNand = {
-    driver: nandDriver,
-    getRecentIO: () => nandDriver.getRecentIOEvents(),
-    clearRecentIO: () => nandDriver.clearRecentIO(),
-    setVerbose: (enabled: boolean) => nandDriver.setVerboseLogging(enabled),
-    isVerbose: () => nandDriver.isVerbose(),
-    readChunk: (chunkIndex: number) => nandDriver.readChunk(chunkIndex),
-    writeChunk: (chunkIndex: number, data: Uint8Array) => nandDriver.writeChunk(chunkIndex, data),
-    corruptChunk: (chunkIndex: number) => nandDriver.corruptChunk(chunkIndex),
-  };
-}
