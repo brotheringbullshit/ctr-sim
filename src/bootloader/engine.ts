@@ -167,6 +167,8 @@ export async function runBootSequence(
       await nandDriver.provisionFreshNand();
       callbacks.onLog(makeLog('IDB', 'ok', '4.00 MB AES-128-CTR encrypted NAND committed to IndexedDB.', t0));
       await wait(250);
+    } else {
+      await nandDriver.loadPersistedKeyslots();
     }
     if (checkAbort()) return { outcome: 'aborted' };
 

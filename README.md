@@ -8,7 +8,7 @@ An interactive dual-screen Nintendo 3DS XL ("CTR") hardware and Horizon OS simul
   - **Stage 0 (`Boot9` / `Boot11`)**: Initializes AES/RSA engines, WRAM, and 128 MB FCRAM; validates the RSA-2048 signed `NCSD_HDR` and SHA-256 partition digests before decrypting `FIRM0_BOOT1`.
   - **Stage 1 (`FIRM` Loader)**: Executes ARM9 loader vectors from WRAM, validates and decrypts `FIRM1_STAGE2` Kernel9/Kernel11 sections, and locks BootROM halves.
   - **Stage 2 (`Horizon OS`)**: Locks OTP, initializes simulated sysmodules (`Process9`, `pm`, `sm`, `fs`, `pxi`, `NS`, `ErrDisp`), mounts encrypted NAND partitions into FCRAM caches, and boots the HOME Menu.
-  - Hold **SELECT** (FIRM Boot Configuration) or **START** (CTR-NAND Recovery Manager) while powering on to enter low-level boot shells.
+  - Hold **SELECT** (FIRM Boot Configuration — including encrypted/decrypted 4.00 MB NAND `.bin` dump & restore plus AES-128-CTR keyslot export/import) or **START** (CTR-NAND Recovery Manager) while powering on to enter low-level boot shells.
 
 - **Simulated CTR Memory Controller — WRAM + 128 MB FCRAM (`src/ram/fcram.ts`)**:
   - Models ARM9 internal WRAM (`0x08000000`) and 128 MB FCRAM (`0x20000000`) with hardware security latches (`boot9Locked`, `otpLocked`).

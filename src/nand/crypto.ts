@@ -148,6 +148,242 @@ export const CTR_KEYSLOTS: Record<Exclude<PartitionId, 'ncsd_hdr'>, KeyslotInfo>
   },
 };
 
+export function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.trim().replace(/^0x/i, '').replace(/[^0-9a-fA-F]/g, '');
+  if (clean.length % 2 !== 0) {
+    throw new Error('Invalid hex string length');
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+export interface KeyslotSecret {
+  keyBytes: Uint8Array;
+  initialCounter: Uint8Array;
+}
+
+export type PartitionKeyOverrideMap = Partial<
+  Record<Exclude<PartitionId, 'ncsd_hdr'>, KeyslotSecret>
+>;
+
+export interface CtrKeyBundle {
+  format: 'CTR-SIM-KEYBUNDLE-V1';
+  exportedAt: string;
+  aesKeyslots: Record<
+    Exclude<PartitionId, 'ncsd_hdr'>,
+    {
+      slot: number;
+      slotHex: string;
+      name: string;
+      keyHex: string;
+      initialCounterHex: string;
+    }
+  >;
+  rootCaRsaPublicJwk: JsonWebKey;
+}
+
+const DEFAULT_CTR_KEYSLOT_SECRETS: Record<Exclude<PartitionId, 'ncsd_hdr'>, KeyslotSecret> = {
+  firm0_boot1: {
+    keyBytes: new Uint8Array(CTR_KEYSLOTS.firm0_boot1.keyBytes),
+    initialCounter: new Uint8Array(CTR_KEYSLOTS.firm0_boot1.initialCounter),
+  },
+  firm1_stage2: {
+    keyBytes: new Uint8Array(CTR_KEYSLOTS.firm1_stage2.keyBytes),
+    initialCounter: new Uint8Array(CTR_KEYSLOTS.firm1_stage2.initialCounter),
+  },
+  twl_sysdata: {
+    keyBytes: new Uint8Array(CTR_KEYSLOTS.twl_sysdata.keyBytes),
+    initialCounter: new Uint8Array(CTR_KEYSLOTS.twl_sysdata.initialCounter),
+  },
+  ctrnand_sys: {
+    keyBytes: new Uint8Array(CTR_KEYSLOTS.ctrnand_sys.keyBytes),
+    initialCounter: new Uint8Array(CTR_KEYSLOTS.ctrnand_sys.initialCounter),
+  },
+  nand_userdata: {
+    keyBytes: new Uint8Array(CTR_KEYSLOTS.nand_userdata.keyBytes),
+    initialCounter: new Uint8Array(CTR_KEYSLOTS.nand_userdata.initialCounter),
+  },
+};
+
+export function areKeyslotsDefault(): boolean {
+  const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
+    'firm0_boot1',
+    'firm1_stage2',
+    'twl_sysdata',
+    'ctrnand_sys',
+    'nand_userdata',
+  ];
+  return ids.every((id) => {
+    const cur = CTR_KEYSLOTS[id];
+    const def = DEFAULT_CTR_KEYSLOT_SECRETS[id];
+    return (
+      bytesToHex(cur.keyBytes) === bytesToHex(def.keyBytes) &&
+      bytesToHex(cur.initialCounter) === bytesToHex(def.initialCounter)
+    );
+  });
+}
+
+export function applyKeyslotOverrides(overrides: PartitionKeyOverrideMap): void {
+  const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
+    'firm0_boot1',
+    'firm1_stage2',
+    'twl_sysdata',
+    'ctrnand_sys',
+    'nand_userdata',
+  ];
+  for (const id of ids) {
+    const next = overrides[id];
+    if (next && next.keyBytes.byteLength === 16 && next.initialCounter.byteLength === 16) {
+      CTR_KEYSLOTS[id].keyBytes = new Uint8Array(next.keyBytes);
+      CTR_KEYSLOTS[id].initialCounter = new Uint8Array(next.initialCounter);
+    }
+  }
+  aesKeyCache.clear();
+}
+
+export function resetDefaultKeyslots(): void {
+  applyKeyslotOverrides(DEFAULT_CTR_KEYSLOT_SECRETS);
+}
+
+export function exportCtrKeyBundle(): CtrKeyBundle {
+  return {
+    format: 'CTR-SIM-KEYBUNDLE-V1',
+    exportedAt: new Date().toISOString(),
+    aesKeyslots: {
+      firm0_boot1: {
+        slot: CTR_KEYSLOTS.firm0_boot1.slot,
+        slotHex: CTR_KEYSLOTS.firm0_boot1.slotHex,
+        name: CTR_KEYSLOTS.firm0_boot1.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.firm0_boot1.keyBytes),
+        initialCounterHex: bytesToHex(CTR_KEYSLOTS.firm0_boot1.initialCounter),
+      },
+      firm1_stage2: {
+        slot: CTR_KEYSLOTS.firm1_stage2.slot,
+        slotHex: CTR_KEYSLOTS.firm1_stage2.slotHex,
+        name: CTR_KEYSLOTS.firm1_stage2.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.firm1_stage2.keyBytes),
+        initialCounterHex: bytesToHex(CTR_KEYSLOTS.firm1_stage2.initialCounter),
+      },
+      twl_sysdata: {
+        slot: CTR_KEYSLOTS.twl_sysdata.slot,
+        slotHex: CTR_KEYSLOTS.twl_sysdata.slotHex,
+        name: CTR_KEYSLOTS.twl_sysdata.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.twl_sysdata.keyBytes),
+        initialCounterHex: bytesToHex(CTR_KEYSLOTS.twl_sysdata.initialCounter),
+      },
+      ctrnand_sys: {
+        slot: CTR_KEYSLOTS.ctrnand_sys.slot,
+        slotHex: CTR_KEYSLOTS.ctrnand_sys.slotHex,
+        name: CTR_KEYSLOTS.ctrnand_sys.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.ctrnand_sys.keyBytes),
+        initialCounterHex: bytesToHex(CTR_KEYSLOTS.ctrnand_sys.initialCounter),
+      },
+      nand_userdata: {
+        slot: CTR_KEYSLOTS.nand_userdata.slot,
+        slotHex: CTR_KEYSLOTS.nand_userdata.slotHex,
+        name: CTR_KEYSLOTS.nand_userdata.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.nand_userdata.keyBytes),
+        initialCounterHex: bytesToHex(CTR_KEYSLOTS.nand_userdata.initialCounter),
+      },
+    },
+    rootCaRsaPublicJwk: { ...NINTENDO_ROOT_PUB_JWK },
+  };
+}
+
+/**
+ * Exports a compact 248-byte binary keyslot database (aeskeydb.bin):
+ * 8-byte header ("KEY0", version=1) + 5 × 48-byte records [partitionId(15), slot(1), key(16), ctr(16)]
+ */
+export function exportAesKeyDbBinary(): Uint8Array {
+  const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
+    'firm0_boot1',
+    'firm1_stage2',
+    'twl_sysdata',
+    'ctrnand_sys',
+    'nand_userdata',
+  ];
+  const out = new Uint8Array(8 + ids.length * 48);
+  writeAsciiFixed(out, 0, 'KEY0', 4);
+  writeUint32LE(out, 4, ids.length);
+  ids.forEach((id, idx) => {
+    const off = 8 + idx * 48;
+    const slotInfo = CTR_KEYSLOTS[id];
+    writeAsciiFixed(out, off, id, 15);
+    out[off + 15] = slotInfo.slot & 0xff;
+    out.set(slotInfo.keyBytes.subarray(0, 16), off + 16);
+    out.set(slotInfo.initialCounter.subarray(0, 16), off + 32);
+  });
+  return out;
+}
+
+export function parseKeyBundleFile(bytes: Uint8Array): PartitionKeyOverrideMap {
+  const headerMagic = readAsciiFixed(bytes, 0, 4);
+  if (headerMagic === 'KEY0' && bytes.byteLength >= 8 + 48) {
+    const count = Math.min(readUint32LE(bytes, 4), 16);
+    const out: PartitionKeyOverrideMap = {};
+    const validIds = new Set<Exclude<PartitionId, 'ncsd_hdr'>>([
+      'firm0_boot1',
+      'firm1_stage2',
+      'twl_sysdata',
+      'ctrnand_sys',
+      'nand_userdata',
+    ]);
+    for (let i = 0; i < count; i++) {
+      const off = 8 + i * 48;
+      if (off + 48 > bytes.byteLength) break;
+      const partId = readAsciiFixed(bytes, off, 15) as Exclude<PartitionId, 'ncsd_hdr'>;
+      if (validIds.has(partId)) {
+        out[partId] = {
+          keyBytes: bytes.slice(off + 16, off + 32),
+          initialCounter: bytes.slice(off + 32, off + 48),
+        };
+      }
+    }
+    if (Object.keys(out).length === 0) {
+      throw new Error('No recognized partition keyslots inside binary keyfile');
+    }
+    return out;
+  }
+
+  const text = textDecoder.decode(bytes);
+  const parsed = JSON.parse(text) as Partial<CtrKeyBundle>;
+  if (!parsed || parsed.format !== 'CTR-SIM-KEYBUNDLE-V1' || !parsed.aesKeyslots) {
+    throw new Error('Unrecognized keyfile format (expected CTR-SIM-KEYBUNDLE-V1 JSON or aeskeydb.bin)');
+  }
+  const out: PartitionKeyOverrideMap = {};
+  const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
+    'firm0_boot1',
+    'firm1_stage2',
+    'twl_sysdata',
+    'ctrnand_sys',
+    'nand_userdata',
+  ];
+  for (const id of ids) {
+    const entry = parsed.aesKeyslots[id];
+    if (entry?.keyHex && entry?.initialCounterHex) {
+      const keyBytes = hexToBytes(entry.keyHex);
+      const initialCounter = hexToBytes(entry.initialCounterHex);
+      if (keyBytes.byteLength !== 16 || initialCounter.byteLength !== 16) {
+        throw new Error(`Invalid 128-bit key/counter length for ${id}`);
+      }
+      out[id] = { keyBytes, initialCounter };
+    }
+  }
+  if (Object.keys(out).length === 0) {
+    throw new Error('Keyfile did not contain any valid partition keyslots');
+  }
+  return out;
+}
+
 // Cached CryptoKey objects for high-throughput block operations
 const aesKeyCache = new Map<string, CryptoKey>();
 

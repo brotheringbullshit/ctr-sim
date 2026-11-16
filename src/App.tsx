@@ -468,6 +468,7 @@ export default function App() {
           stage2ConfigHeader={stage2ConfigHeader}
           partitionChecks={partitionChecks}
           onRepairPartition={(id) => void handleRepairPartition(id)}
+          onRefreshAudit={refreshAudit}
           onReboot={(hold) => void startBoot(hold)}
         />
       );

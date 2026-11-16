@@ -16,7 +16,12 @@ import {
   buildNcsdHeaderFromHashes,
   buildSysDataPartition,
   buildUserDataPartition,
+  parseCtrNandPartition,
+  parseFirm0Partition,
+  parseFirm1Partition,
   parseNcsdHeader,
+  parseSysDataPartition,
+  parseUserDataPartition,
   getDefaultStage1Opcodes,
   getDefaultStage2Header,
   getDefaultSystemConfig,
@@ -24,9 +29,16 @@ import {
   getDefaultUserSaveData,
 } from './payloads';
 import {
+  applyKeyslotOverrides,
+  bytesToHex,
   computeSHA256Hex,
+  CTR_KEYSLOTS,
   decryptPartition,
   encryptPartition,
+  hexToBytes,
+  PartitionKeyOverrideMap,
+  readAsciiFixed,
+  resetDefaultKeyslots,
 } from './crypto';
 
 const DB_NAME = 'CTR_SIM_VIRTUAL_NAND_V1';
@@ -298,6 +310,7 @@ class NandIDBDriver {
    */
   provisionFreshNand(): Promise<void> {
     return this.enqueueWrite(async () => {
+      resetDefaultKeyslots();
       const rawFirm0 = buildFirm0Partition(getDefaultStage1Opcodes());
       const rawFirm1 = buildFirm1Partition(getDefaultStage2Header());
       const rawSysdata = buildSysDataPartition(getDefaultSystemConfig());
@@ -347,7 +360,8 @@ class NandIDBDriver {
             } satisfies StoredChunkRecord);
           }
         }
-        tx.objectStore(STORE_META).put({
+        const metaStore = tx.objectStore(STORE_META);
+        metaStore.put({
           key: 'provisioned',
           value: true,
           cryptoVersion: 2,
@@ -355,6 +369,7 @@ class NandIDBDriver {
           signature: 'RSASSA-PKCS1-v1_5',
           formattedAt: Date.now(),
         });
+        metaStore.delete('custom_keyslots');
         tx.oncomplete = () => {
           for (let i = 0; i < TOTAL_CHUNKS; i++) {
             this.emitIO(i, 'write');
@@ -400,6 +415,240 @@ class NandIDBDriver {
     const ciphertext = await this.readPartition(id);
     if (id === 'ncsd_hdr') return ciphertext;
     return decryptPartition(id, ciphertext);
+  }
+
+  async loadPersistedKeyslots(): Promise<void> {
+    const db = await this.openDB();
+    const stored = await new Promise<
+      Record<string, { keyHex: string; counterHex: string }> | null
+    >((resolve, reject) => {
+      const tx = db.transaction(STORE_META, 'readonly');
+      const req = tx.objectStore(STORE_META).get('custom_keyslots');
+      req.onsuccess = () => resolve(req.result?.value ?? null);
+      req.onerror = () => reject(req.error);
+    });
+
+    if (!stored) return;
+    const map: PartitionKeyOverrideMap = {};
+    const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
+      'firm0_boot1',
+      'firm1_stage2',
+      'twl_sysdata',
+      'ctrnand_sys',
+      'nand_userdata',
+    ];
+    for (const id of ids) {
+      const entry = stored[id];
+      if (entry?.keyHex && entry?.counterHex) {
+        map[id] = {
+          keyBytes: hexToBytes(entry.keyHex),
+          initialCounter: hexToBytes(entry.counterHex),
+        };
+      }
+    }
+    if (Object.keys(map).length > 0) {
+      applyKeyslotOverrides(map);
+    }
+  }
+
+  async resetKeyslotsToDefault(): Promise<void> {
+    return this.enqueueWrite(async () => {
+      resetDefaultKeyslots();
+      const db = await this.openDB();
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_META, 'readwrite');
+        tx.objectStore(STORE_META).delete('custom_keyslots');
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    });
+  }
+
+  /**
+   * Reads the entire 4.00 MB (256 × 16 KB) NAND image from IndexedDB.
+   * When mode === 'decrypted', AES-128-CTR decrypts all encrypted partitions into plaintext.
+   */
+  async dumpNandImage(mode: 'encrypted' | 'decrypted'): Promise<Uint8Array> {
+    const db = await this.openDB();
+    const records = await new Promise<StoredChunkRecord[]>((resolve, reject) => {
+      const tx = db.transaction(STORE_CHUNKS, 'readonly');
+      const req = tx.objectStore(STORE_CHUNKS).getAll();
+      req.onsuccess = () => resolve((req.result as StoredChunkRecord[]) ?? []);
+      req.onerror = () => reject(req.error);
+    });
+
+    const totalBytes = TOTAL_CHUNKS * CHUNK_SIZE;
+    const rawNand = new Uint8Array(totalBytes);
+    for (const rec of records) {
+      if (rec.chunkIndex >= 0 && rec.chunkIndex < TOTAL_CHUNKS) {
+        const bytes = rec.data instanceof Uint8Array ? rec.data : new Uint8Array(rec.data);
+        rawNand.set(bytes.subarray(0, CHUNK_SIZE), rec.chunkIndex * CHUNK_SIZE);
+      }
+    }
+    this.emitIO(0, 'read');
+
+    if (mode === 'encrypted') {
+      return rawNand;
+    }
+
+    const decNand = new Uint8Array(totalBytes);
+    // Chunk 0 (NCSD_HDR) is stored plaintext
+    decNand.set(rawNand.subarray(0, CHUNK_SIZE), 0);
+
+    for (const spec of NAND_PARTITIONS) {
+      if (spec.id === 'ncsd_hdr') continue;
+      const startByte = spec.startChunk * CHUNK_SIZE;
+      const endByte = (spec.endChunk + 1) * CHUNK_SIZE;
+      const decSlice = await decryptPartition(spec.id, rawNand.subarray(startByte, endByte));
+      decNand.set(decSlice, startByte);
+    }
+    return decNand;
+  }
+
+  /**
+   * Restores a 4.00 MB (256 × 16 KB) NAND .bin backup (auto-detecting Encrypted vs Decrypted .bin).
+   * Optionally imports custom AES-128-CTR keyslots alongside an encrypted or decrypted NAND backup.
+   */
+  restoreNandImage(
+    imageBytes: Uint8Array,
+    keyOverrides?: PartitionKeyOverrideMap
+  ): Promise<{
+    mode: 'encrypted' | 'decrypted';
+    usedCustomKeys: boolean;
+    validPartitions: number;
+  }> {
+    return this.enqueueWrite(async () => {
+      const expectedSize = TOTAL_CHUNKS * CHUNK_SIZE;
+      if (imageBytes.byteLength !== expectedSize) {
+        throw new Error(
+          `Invalid NAND .bin size: expected ${expectedSize.toLocaleString()} bytes (4.00 MB), got ${imageBytes.byteLength.toLocaleString()} bytes`
+        );
+      }
+
+      if (keyOverrides && Object.keys(keyOverrides).length > 0) {
+        applyKeyslotOverrides(keyOverrides);
+      }
+
+      // Detect whether imageBytes contains plaintext (decrypted) or ciphertext (encrypted) partitions
+      let plaintextMagicHits = 0;
+      for (const spec of NAND_PARTITIONS) {
+        if (spec.id === 'ncsd_hdr') continue;
+        const off = spec.startChunk * CHUNK_SIZE;
+        const magic = readAsciiFixed(imageBytes, off, 4);
+        if (magic === spec.magic) {
+          plaintextMagicHits++;
+        }
+      }
+
+      const mode: 'encrypted' | 'decrypted' = plaintextMagicHits >= 1 ? 'decrypted' : 'encrypted';
+      const finalNand = new Uint8Array(expectedSize);
+
+      if (mode === 'decrypted') {
+        const encPartitions = {} as Record<Exclude<PartitionId, 'ncsd_hdr'>, Uint8Array>;
+        for (const spec of NAND_PARTITIONS) {
+          if (spec.id === 'ncsd_hdr') continue;
+          const startByte = spec.startChunk * CHUNK_SIZE;
+          const endByte = (spec.endChunk + 1) * CHUNK_SIZE;
+          const plainSlice = imageBytes.subarray(startByte, endByte);
+          const encSlice = await encryptPartition(spec.id, plainSlice);
+          encPartitions[spec.id] = encSlice;
+          finalNand.set(encSlice, startByte);
+        }
+        const rebuiltNcsd = await buildNcsdHeader(encPartitions);
+        finalNand.set(rebuiltNcsd, 0);
+      } else {
+        finalNand.set(imageBytes, 0);
+      }
+
+      // Count how many partitions validate cleanly under active keyslots
+      let validPartitions = 0;
+      const ncsdParsed = await parseNcsdHeader(finalNand.subarray(0, CHUNK_SIZE));
+      if (ncsdParsed.ok) validPartitions++;
+
+      for (const spec of NAND_PARTITIONS) {
+        if (spec.id === 'ncsd_hdr') continue;
+        const startByte = spec.startChunk * CHUNK_SIZE;
+        const endByte = (spec.endChunk + 1) * CHUNK_SIZE;
+        const cipherSlice = finalNand.subarray(startByte, endByte);
+        try {
+          const dec = await decryptPartition(spec.id, cipherSlice);
+          let ok = false;
+          if (spec.id === 'firm0_boot1') ok = parseFirm0Partition(dec).ok;
+          else if (spec.id === 'firm1_stage2') ok = parseFirm1Partition(dec).ok;
+          else if (spec.id === 'twl_sysdata') ok = parseSysDataPartition(dec).ok;
+          else if (spec.id === 'ctrnand_sys') ok = parseCtrNandPartition(dec).ok;
+          else if (spec.id === 'nand_userdata') ok = parseUserDataPartition(dec).ok;
+          if (ok) {
+            if (!ncsdParsed.ok) {
+              validPartitions++;
+            } else {
+              const sha = await computeSHA256Hex(cipherSlice);
+              if (sha === ncsdParsed.records[spec.id]?.sha256) validPartitions++;
+            }
+          }
+        } catch {
+          // Leave invalid
+        }
+      }
+
+      const db = await this.openDB();
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction([STORE_CHUNKS, STORE_META], 'readwrite');
+        const store = tx.objectStore(STORE_CHUNKS);
+        for (let i = 0; i < TOTAL_CHUNKS; i++) {
+          const pid = getPartitionForChunk(i);
+          store.put({
+            chunkIndex: i,
+            partitionId: pid,
+            data: finalNand.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
+            updatedAt: Date.now(),
+          } satisfies StoredChunkRecord);
+        }
+
+        const metaStore = tx.objectStore(STORE_META);
+        metaStore.put({
+          key: 'provisioned',
+          value: true,
+          cryptoVersion: 2,
+          cipher: 'AES-128-CTR',
+          signature: 'RSASSA-PKCS1-v1_5',
+          formattedAt: Date.now(),
+        });
+
+        if (keyOverrides && Object.keys(keyOverrides).length > 0) {
+          const serialized: Record<string, { keyHex: string; counterHex: string }> = {};
+          const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
+            'firm0_boot1',
+            'firm1_stage2',
+            'twl_sysdata',
+            'ctrnand_sys',
+            'nand_userdata',
+          ];
+          for (const id of ids) {
+            serialized[id] = {
+              keyHex: bytesToHex(CTR_KEYSLOTS[id].keyBytes),
+              counterHex: bytesToHex(CTR_KEYSLOTS[id].initialCounter),
+            };
+          }
+          metaStore.put({
+            key: 'custom_keyslots',
+            value: serialized,
+          });
+        }
+
+        tx.oncomplete = () => {
+          this.emitIO(0, 'write');
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      });
+
+      return {
+        mode,
+        usedCustomKeys: Boolean(keyOverrides && Object.keys(keyOverrides).length > 0),
+        validPartitions,
+      };
+    });
   }
 }
 
