@@ -1,23 +1,33 @@
-export const CHUNK_SIZE = 16384; // 16 KB per IDB chunk
-export const TOTAL_CHUNKS = 256; // 256 chunks = 4.00 MB Virtual NAND
+export const MEDIA_UNIT_SIZE = 512; // 0x200 bytes per eMMC media unit
+export const CHUNK_SIZE = 16384; // 16 KB per IDB chunk (32 media units)
+export const TOTAL_CHUNKS = 256; // 256 chunks = 4.00 MB compact backing store (8,192 media units)
+export const REAL_OLD3DS_NAND_BYTES = 0x3af00000; // ~943 MiB real Old3DS eMMC image
 
 export type PartitionId =
   | 'ncsd_hdr'
-  | 'firm0_boot1'
-  | 'firm1_stage2'
-  | 'twl_sysdata'
-  | 'ctrnand_sys'
-  | 'nand_userdata';
+  | 'twl_nand'
+  | 'agbsave'
+  | 'firm0'
+  | 'firm1'
+  | 'ctrnand';
+
+export type DataPartitionId = Exclude<PartitionId, 'ncsd_hdr'>;
 
 export interface PartitionSpec {
   id: PartitionId;
   name: string;
   label: string;
-  filesystem: 'Raw Binary' | 'FAT16';
+  filesystem: 'Raw Binary' | 'FAT16' | 'FAT16 / FAT12';
   logicalPartition: string;
   mountPoint: string;
   startChunk: number;
   endChunk: number; // inclusive
+  realOffsetHex: string;
+  realSizeHex: string;
+  ncsdIndex?: number;
+  ncsdFsType?: number;
+  ncsdCryptType?: number;
+  keyslotHex: string;
   magic: string;
   color: string;
   description: string;
@@ -28,86 +38,119 @@ export const NAND_PARTITIONS: PartitionSpec[] = [
   {
     id: 'ncsd_hdr',
     name: 'NCSD_HDR',
-    label: 'NCSD Master Header',
+    label: 'NCSD Header + TWL MBR',
     filesystem: 'Raw Binary',
-    logicalPartition: 'NCSD / FIRM0',
+    logicalPartition: 'NCSD (0x000..0x1FF)',
     mountPoint: 'raw:/0x000000',
     startChunk: 0,
     endChunk: 0,
+    realOffsetHex: '0x00000000',
+    realSizeHex: '0x00000200',
+    keyslotHex: 'RSA-2048 (0x100..0x1FF) + 0x03 (MBR 0x1BE)',
     magic: 'NCSD',
     color: '#6366f1',
-    description: 'RSA-2048 signature block, partition table, NAND geometry, and SHA-256 digests for Boot9.',
+    description: 'Sector 0: RSA-2048 signature (0x000..0x0FF), NCSD table (0x100..0x15F), and encrypted TWL MBR (0x1BE..0x1FF).',
     requiredBy: 'Boot9 / Boot11 (Stage 0)',
   },
   {
-    id: 'firm0_boot1',
-    name: 'FIRM0_BOOT1',
-    label: 'FIRM0 Core Kernel',
-    filesystem: 'Raw Binary',
-    logicalPartition: 'FIRM0',
-    mountPoint: 'firm0:/',
+    id: 'twl_nand',
+    name: 'TWL',
+    label: 'TWLN (FAT16) + TWLP (FAT12)',
+    filesystem: 'FAT16 / FAT12',
+    logicalPartition: 'NCSD[0] · TWLN + TWLP',
+    mountPoint: 'twln:/ + twlp:/',
     startChunk: 1,
-    endChunk: 15,
+    endChunk: 31,
+    realOffsetHex: '0x00000000',
+    realSizeHex: '0x0B100000',
+    ncsdIndex: 0,
+    ncsdFsType: 1,
+    ncsdCryptType: 1,
+    keyslotHex: '0x03 (TWL CID CTR)',
+    magic: 'TWL0',
+    color: '#d97706',
+    description: 'MBR-partitioned TWL region: TWLN FAT16 (real 0x12E00) for DSiWare/DS config + TWLP FAT12 (real 0x09011A00) for DSi photos/audio.',
+    requiredBy: 'TWL_FIRM & Stage 2',
+  },
+  {
+    id: 'agbsave',
+    name: 'AGBSAVE',
+    label: 'GBA VC Save Scratchpad',
+    filesystem: 'Raw Binary',
+    logicalPartition: 'NCSD[1] · AGBSAVE',
+    mountPoint: 'agbsave:/',
+    startChunk: 32,
+    endChunk: 43, // 12 chunks = 196,608 B = 0x30000 exact real 3DS size!
+    realOffsetHex: '0x0B100000',
+    realSizeHex: '0x00030000',
+    ncsdIndex: 1,
+    ncsdFsType: 4,
+    ncsdCryptType: 2,
+    keyslotHex: '0x07 / 0x24 (CID CTR)',
+    magic: '.SAV',
+    color: '#e11d48',
+    description: 'Dedicated 192 KB (0x30000) raw binary scratchpad holding Game Boy Advance Virtual Console (AGB_FIRM) save data.',
+    requiredBy: 'AGB_FIRM',
+  },
+  {
+    id: 'firm0',
+    name: 'FIRM0',
+    label: 'NATIVE_FIRM Primary',
+    filesystem: 'Raw Binary',
+    logicalPartition: 'NCSD[2] · FIRM0',
+    mountPoint: 'firm0:/',
+    startChunk: 44,
+    endChunk: 59,
+    realOffsetHex: '0x0B130000',
+    realSizeHex: '0x00400000',
+    ncsdIndex: 2,
+    ncsdFsType: 3,
+    ncsdCryptType: 2,
+    keyslotHex: '0x06 (CID CTR)',
     magic: 'FIRM',
     color: '#0284c7',
-    description: 'Stores core NATIVE_FIRM ARM9/ARM11 kernel entrypoints and BootROM lockout section loader.',
-    requiredBy: 'Boot9 -> FIRM Validation',
+    description: 'Primary NATIVE_FIRM image (4 MiB slot on real hardware): ARM9/ARM11 kernel sections, Process9, and sysmodules.',
+    requiredBy: 'Boot9 -> FIRM0 Boot',
   },
   {
-    id: 'firm1_stage2',
-    name: 'FIRM1_STAGE2',
-    label: 'FIRM1 Backup Kernel',
+    id: 'firm1',
+    name: 'FIRM1',
+    label: 'NATIVE_FIRM Backup',
     filesystem: 'Raw Binary',
-    logicalPartition: 'FIRM1',
+    logicalPartition: 'NCSD[3] · FIRM1',
     mountPoint: 'firm1:/',
-    startChunk: 16,
-    endChunk: 47,
-    magic: 'STG2',
+    startChunk: 60,
+    endChunk: 75,
+    realOffsetHex: '0x0B530000',
+    realSizeHex: '0x00400000',
+    ncsdIndex: 3,
+    ncsdFsType: 3,
+    ncsdCryptType: 2,
+    keyslotHex: '0x06 (CID CTR)',
+    magic: 'FIRM',
     color: '#0d9488',
-    description: 'Backup NATIVE_FIRM, Kernel9 (OTP lock + Process9), Kernel11 sysmodules, and NS shell.',
-    requiredBy: 'FIRM Entry -> Horizon OS',
+    description: 'Failover NATIVE_FIRM backup image (4 MiB slot on real hardware); Boot9 falls back to FIRM1 if FIRM0 is corrupt.',
+    requiredBy: 'Boot9 Failover FIRM',
   },
   {
-    id: 'twl_sysdata',
-    name: 'TWL_SYSDATA',
-    label: 'TWLN / TWLP & RW Identity',
+    id: 'ctrnand',
+    name: 'CTRNAND',
+    label: 'CTRNAND OS, Titles & Data',
     filesystem: 'FAT16',
-    logicalPartition: 'TWLN / TWLP',
-    mountPoint: 'nand:/rw/sys/',
-    startChunk: 48,
-    endChunk: 79,
-    magic: 'CFG0',
-    color: '#d97706',
-    description: 'TWLN/TWLP DS compatibility config, SecureInfo_A, LocalFriendCodeSeed_B, and movable.sed.',
-    requiredBy: 'Stage 2 & HOME Menu',
-  },
-  {
-    id: 'ctrnand_sys',
-    name: 'CTRNAND_SYS',
-    label: 'CTRNAND OS & Databases',
-    filesystem: 'FAT16',
-    logicalPartition: 'CTRNAND',
+    logicalPartition: 'NCSD[4] · CTRNAND',
     mountPoint: 'ctrnand:/',
-    startChunk: 80,
-    endChunk: 159,
-    magic: 'CND0',
-    color: '#059669',
-    description: 'Primary CTRNAND partition: /title/ (.tmd + .app NCCH), /dbs/ (ticket.db, certs.db, title.db, import.db).',
-    requiredBy: 'Stage 2 & HOME Menu',
-  },
-  {
-    id: 'nand_userdata',
-    name: 'NAND_USERDATA',
-    label: 'CTRNAND Data & AGBSAVE',
-    filesystem: 'FAT16',
-    logicalPartition: 'CTRNAND /data/<ID0> & AGBSAVE',
-    mountPoint: 'nand:/data/',
-    startChunk: 160,
+    startChunk: 76,
     endChunk: 255,
-    magic: 'USR0',
-    color: '#e11d48',
-    description: '/data/<ID0>/ sysdata/extdata, HOME Menu layout, Mii DB, Game Notes, and AGBSAVE VC scratchpad.',
-    requiredBy: 'HOME Menu & Applets',
+    realOffsetHex: '0x0B930000',
+    realSizeHex: '0x2F5D0000',
+    ncsdIndex: 4,
+    ncsdFsType: 1,
+    ncsdCryptType: 2,
+    keyslotHex: '0x04 (Old3DS CID CTR)',
+    magic: 'FAT16',
+    color: '#059669',
+    description: 'MBR + FAT16 volume "CTR" containing OS/Applet NCCH .app/.tmd files (/title/), /dbs/, /data/<ID0>/, /rw/sys/, and /private/movable.sed.',
+    requiredBy: 'Kernel9 & Horizon OS',
   },
 ];
 
@@ -369,6 +412,43 @@ export interface BootStage2Header {
   arm11Entry?: string;
   sysmodules?: string[];
   mountEntries: Array<{ mount: string; partition: PartitionId; required: boolean }>;
+}
+
+export interface FirmBinaryPayload {
+  magic: 'FIRM';
+  slotName: 'FIRM0' | 'FIRM1';
+  arm9Entry: string;
+  arm11Entry: string;
+  splVersion: string;
+  opcodes: Stage1Opcode[];
+  stage2Header: BootStage2Header;
+}
+
+export interface TwlPartitionData {
+  twlnFilesystem: 'FAT16';
+  twlnRealOffsetHex: string; // '0x00012E00'
+  twlpFilesystem: 'FAT12';
+  twlpRealOffsetHex: string; // '0x09011A00'
+  twlSystemVersion: string;
+  dsiWareTitleIds: string[];
+  twlpPhotoSlots: number;
+  twlpSoundSlots: number;
+}
+
+export interface AgbSaveData {
+  magic: '.SAV';
+  realOffsetHex: string; // '0x0B100000'
+  realSizeHex: string; // '0x00030000'
+  titleId: string;
+  saveType: string;
+  populated: boolean;
+  cmacHex: string;
+}
+
+export interface CtrNandVolumeData {
+  config: SystemConfig;
+  archive: CtrNandArchiveData;
+  userData: UserSaveData;
 }
 
 export interface PartitionIntegrity {

@@ -11,6 +11,7 @@ import {
   areKeyslotsDefault,
   exportAesKeyDbBinary,
   exportCtrKeyBundle,
+  getNandCidHex,
   parseKeyBundleFile,
   PartitionKeyOverrideMap,
 } from '../nand/crypto';
@@ -57,7 +58,11 @@ interface FirmBackupUiState {
   configTab: 'mounts' | 'nand_backup';
   busyOp: boolean;
   statusMsg: { ok: boolean; text: string } | null;
-  stagedKeys: { fileName: string; map: PartitionKeyOverrideMap } | null;
+  stagedKeys: {
+    fileName: string;
+    keyOverrides: PartitionKeyOverrideMap;
+    nandCid?: Uint8Array;
+  } | null;
 }
 
 let sharedFirmBackupUi: FirmBackupUiState = {
@@ -113,7 +118,7 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
       updateFirmBackupUi({
         statusMsg: {
           ok: true,
-          text: 'Dumped encrypted NAND (4.00 MB) + ctr-sim-keys.json',
+          text: 'Dumped encrypted NAND (4.00 MB) + CID/keys (ctr-sim-keys.json)',
         },
       });
     } catch (err) {
@@ -161,13 +166,13 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
         const keysJson = JSON.stringify(exportCtrKeyBundle(), null, 2);
         triggerDownload('ctr-sim-keys.json', keysJson, 'application/json');
         updateFirmBackupUi({
-          statusMsg: { ok: true, text: 'Exported ctr-sim-keys.json (AES-128-CTR + RSA pubkey)' },
+          statusMsg: { ok: true, text: 'Exported ctr-sim-keys.json (CID + AES-128-CTR slots + RSA pubkey)' },
         });
       } else {
         const bin = exportAesKeyDbBinary();
         triggerDownload('aeskeydb.bin', bin, 'application/octet-stream');
         updateFirmBackupUi({
-          statusMsg: { ok: true, text: `Exported aeskeydb.bin (${bin.byteLength} bytes)` },
+          statusMsg: { ok: true, text: `Exported aeskeydb.bin (${bin.byteLength} bytes, CID + keyslots)` },
         });
       }
       soundEngine.playConfirm();
@@ -188,12 +193,12 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
     if (!file) return;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const map = parseKeyBundleFile(bytes);
+      const { nandCid, keyOverrides } = parseKeyBundleFile(bytes);
       updateFirmBackupUi({
-        stagedKeys: { fileName: file.name, map },
+        stagedKeys: { fileName: file.name, keyOverrides, nandCid },
         statusMsg: {
           ok: true,
-          text: `Loaded keys from ${file.name} (${Object.keys(map).length} slots)`,
+          text: `Loaded ${Object.keys(keyOverrides).length} slots${nandCid ? ' + NAND CID' : ''} from ${file.name}`,
         },
       });
       soundEngine.playConfirm();
@@ -215,7 +220,11 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
     updateFirmBackupUi({ busyOp: true });
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const res = await nandDriver.restoreNandImage(bytes, sharedFirmBackupUi.stagedKeys?.map);
+      const res = await nandDriver.restoreNandImage(
+        bytes,
+        sharedFirmBackupUi.stagedKeys?.keyOverrides,
+        sharedFirmBackupUi.stagedKeys?.nandCid
+      );
       if (onRefreshAudit) {
         await onRefreshAudit();
       }
@@ -224,7 +233,7 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
         statusMsg: {
           ok: res.validPartitions === NAND_PARTITIONS.length,
           text: `Restored ${res.mode.toUpperCase()} .bin (${res.validPartitions}/${NAND_PARTITIONS.length} valid${
-            res.usedCustomKeys ? ' · custom keys' : ''
+            res.usedCustomKeys ? ' · custom CID/keys' : ''
           })`,
         },
       });
@@ -278,7 +287,7 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
     const bootromErrCode =
       panicInfo.partitionId === 'ncsd_hdr'
         ? '00F800FE'
-        : panicInfo.partitionId === 'firm0_boot1'
+        : panicInfo.partitionId === 'firm0' || panicInfo.partitionId === 'firm1'
         ? '00F800FF'
         : '00F800EF';
 
@@ -338,7 +347,7 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
               </div>
             )}
 
-            <div className="mt-2 p-2 rounded bg-slate-900/90 border border-slate-800 space-y-0.5 text-[9px]">
+            <div className="mt-2 p-2 rounded bg-slate-900/90 border border-slate-800 space-y-0.5 text-[8.8px]">
               <div className="flex items-center justify-between">
                 <span className="text-slate-400">eMMC NAND Image :</span>
                 <span className={validCount === NAND_PARTITIONS.length ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
@@ -346,9 +355,15 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-400">AES-128 Keyslots:</span>
+                <span className="text-slate-400">CID-CTR Keyslots:</span>
                 <span className={isFactoryKeys ? 'text-sky-300' : 'text-amber-300 font-semibold'}>
-                  0x11 / 0x16 / 0x25 / 0x3D ({isFactoryKeys ? 'Factory OTP' : 'Custom'})
+                  0x03 / 0x04 / 0x06 / 0x07 ({isFactoryKeys ? 'OTP' : 'Custom'})
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">CID &amp; NCSD RSA  :</span>
+                <span className="text-slate-300 truncate">
+                  {getNandCidHex().slice(0, 12).toUpperCase()}... · Sim Boot9 0x100..0x1FF
                 </span>
               </div>
             </div>
@@ -419,7 +434,7 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
         <div className="flex-1 min-h-0 overflow-y-auto thin-scroll pr-0.5">
           {configTab === 'mounts' ? (
             <div className="space-y-1">
-              <div className="text-[9px] text-slate-400 mb-1">MOUNT TABLE IN FIRM1_STAGE2:</div>
+              <div className="text-[9px] text-slate-400 mb-1">MOUNT TABLE IN NATIVE_FIRM:</div>
               {stage2ConfigHeader?.mountEntries.map((m) => (
                 <div
                   key={m.mount}
@@ -459,7 +474,7 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
                     onClick={() => handleDumpKeysOnly('json')}
                     className="flex-1 py-1 rounded bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 text-[9px] cursor-pointer"
                   >
-                    Keys (.json)
+                    Keys + CID (.json)
                   </button>
                   <button
                     disabled={busyOp}
@@ -505,7 +520,7 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
                 </div>
                 <div className="text-[8.5px] text-slate-400 truncate">
                   {stagedKeys
-                    ? `Using keys: ${stagedKeys.fileName}`
+                    ? `Using CID/keys: ${stagedKeys.fileName}`
                     : 'Auto-detects Encrypted or Decrypted 4.00 MB NAND .bin'}
                 </div>
               </div>
@@ -545,10 +560,12 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
                 const check = partitionChecks?.[p.id];
                 const ok = check?.valid ?? true;
                 return (
-                  <div key={p.id} className="flex items-center justify-between text-[9px] bg-slate-900/70 px-2 py-0.5 rounded">
-                    <span className="text-slate-200 font-medium">{p.name}</span>
-                    <span className="text-slate-500">ch {p.startChunk}..{p.endChunk}</span>
-                    <span className={ok ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
+                  <div key={p.id} className="flex items-center justify-between text-[9px] bg-slate-900/70 px-2 py-0.5 rounded gap-2">
+                    <span className="text-slate-200 font-medium w-16 shrink-0">{p.name}</span>
+                    <span className="text-slate-500 truncate">
+                      {p.realOffsetHex} · ch {p.startChunk}..{p.endChunk}
+                    </span>
+                    <span className={ok ? 'text-emerald-400 font-semibold shrink-0' : 'text-rose-400 font-semibold shrink-0'}>
                       {ok ? `VALID (${check?.magicFound})` : 'CORRUPT'}
                     </span>
                   </div>
@@ -567,14 +584,24 @@ export const BootScreenOverlay: React.FC<BootScreenProps> = ({
             const check = partitionChecks?.[p.id];
             const ok = check?.valid ?? true;
             return (
-              <div key={p.id} className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded px-2 py-1">
-                <div>
-                  <div className="text-white text-[10px] font-semibold">{p.name}</div>
-                  <div className="text-[9px] text-slate-400">{ok ? 'SHA-256 OK' : check?.reason ?? 'Corrupt'}</div>
+              <div key={p.id} className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded px-2 py-1 gap-2">
+                <div className="min-w-0">
+                  <div className="text-white text-[10px] font-semibold truncate">
+                    {p.name} <span className="text-slate-500 font-normal">({p.filesystem})</span>
+                  </div>
+                  <div className="text-[8.5px] text-slate-400 truncate">
+                    {ok
+                      ? p.id === 'ncsd_hdr'
+                        ? 'RSA-2048 0x100..0x1FF + TWL MBR 0x55AA OK'
+                        : p.id === 'ctrnand'
+                        ? 'MBR 0x06 + FAT16 Vol "CTR" & Keyslot 0x04 OK'
+                        : `${p.keyslotHex} · Decrypt & CRC32 OK`
+                      : check?.reason ?? 'Corrupt'}
+                  </div>
                 </div>
                 <button
                   onClick={() => onRepairPartition(p.id)}
-                  className={`px-2 py-1 rounded text-[9px] font-semibold cursor-pointer ${
+                  className={`px-2 py-1 rounded text-[9px] font-semibold cursor-pointer shrink-0 ${
                     ok
                       ? 'bg-slate-800 hover:bg-slate-700 text-slate-300'
                       : 'bg-emerald-600 hover:bg-emerald-500 text-white'

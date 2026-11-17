@@ -1,25 +1,36 @@
 import {
+  AgbSaveData,
+  BootStage2Header,
   CertChainEntry,
   CHUNK_SIZE,
   ConsoleIdentityFiles,
   CtrNandArchiveData,
+  CtrNandVolumeData,
+  FirmBinaryPayload,
+  MEDIA_UNIT_SIZE,
   NAND_PARTITIONS,
+  NcchAppFile,
   PartitionId,
+  Stage1Opcode,
   SystemConfig,
   SystemTitleEntry,
   TitleCategoryHigh,
   TitleDatabaseEntry,
+  TitleMetadataTmd,
   TitlePackage,
   TitleTicket,
+  TOTAL_CHUNKS,
+  TwlPartitionData,
   UserSaveData,
-  Stage1Opcode,
-  BootStage2Header,
 } from './types';
 import {
+  bytesToHex,
   computeCRC32,
-  computeSHA256Hex,
+  cryptTwlMbrBytes,
   decodeUtf8,
   encodeUtf8,
+  getNandCidHex,
+  hexToBytes,
   readAsciiFixed,
   readUint32LE,
   signRsa2048,
@@ -27,6 +38,7 @@ import {
   writeAsciiFixed,
   writeUint32LE,
 } from './crypto';
+import { buildFat16MbrImage, Fat16BuildFile, jsonToBytes, parseFat16MbrImage } from './fat16';
 
 export function getPartitionByteSize(id: PartitionId): number {
   const spec = NAND_PARTITIONS.find((p) => p.id === id);
@@ -863,7 +875,7 @@ export function getDefaultStage1Opcodes(): Stage1Opcode[] {
 
 export function getDefaultStage2Header(): BootStage2Header {
   return {
-    magic: 'STG2',
+    magic: 'FIRM',
     kernelVersion: 'NATIVE_FIRM 2.58-0 (Kernel9 / Kernel11)',
     buildTag: 'HORIZON-OS-11.17.0-50U',
     autobootTitleId: '0004003000008F02', // Real USA HOME Menu Title ID
@@ -871,24 +883,89 @@ export function getDefaultStage2Header(): BootStage2Header {
     arm11Entry: '0x1FF80000',
     sysmodules: ['Process9', 'pm', 'sm', 'fs', 'pxi', 'NS', 'ErrDisp'],
     mountEntries: [
-      { mount: 'nand:/sys/', partition: 'twl_sysdata', required: true },
-      { mount: 'ctrnand:/title/', partition: 'ctrnand_sys', required: true },
-      { mount: 'nand:/data/', partition: 'nand_userdata', required: false },
+      { mount: 'twln:/ + twlp:/', partition: 'twl_nand', required: true },
+      { mount: 'agbsave:/', partition: 'agbsave', required: false },
+      { mount: 'ctrnand:/', partition: 'ctrnand', required: true },
     ],
   };
 }
 
-// Helper: build a tagged binary partition buffer with header + CRC32 + JSON payload + structured filler
-function buildTaggedBinary(magic: string, totalSize: number, payloadObj: unknown, fillerSeed: number): Uint8Array {
-  const buf = new Uint8Array(totalSize);
-  const payloadBytes = encodeUtf8(JSON.stringify(payloadObj));
+export function getDefaultFirmPayload(slotName: 'FIRM0' | 'FIRM1' = 'FIRM0'): FirmBinaryPayload {
+  return {
+    magic: 'FIRM',
+    slotName,
+    arm9Entry: '0x08006000',
+    arm11Entry: '0x1FF80000',
+    splVersion: 'NATIVE_FIRM 2.58-0',
+    opcodes: getDefaultStage1Opcodes(),
+    stage2Header: getDefaultStage2Header(),
+  };
+}
 
-  // Header layout (32 bytes):
-  // 0x00..0x03: Magic (4 bytes)
-  // 0x04..0x07: Format Version (1)
-  // 0x08..0x0B: Payload Byte Length
-  // 0x0C..0x0F: Payload CRC32
-  // 0x10..0x1F: Partition Signature Tag
+export function getDefaultTwlPartitionData(): TwlPartitionData {
+  return {
+    twlnFilesystem: 'FAT16',
+    twlnRealOffsetHex: '0x00012E00',
+    twlpFilesystem: 'FAT12',
+    twlpRealOffsetHex: '0x09011A00',
+    twlSystemVersion: 'TWL_FIRM 1.4.5U',
+    dsiWareTitleIds: ['000480044B513945'],
+    twlpPhotoSlots: 0,
+    twlpSoundSlots: 0,
+  };
+}
+
+export function getDefaultAgbSaveData(): AgbSaveData {
+  return {
+    magic: '.SAV',
+    realOffsetHex: '0x0B100000',
+    realSizeHex: '0x00030000',
+    titleId: '0004000000000000',
+    saveType: 'SRAM / Flash 128K',
+    populated: false,
+    cmacHex: deterministicHex('AGBSAVE_MAC_CTR', 32),
+  };
+}
+
+export function getDefaultCtrNandVolume(): CtrNandVolumeData {
+  return {
+    config: getDefaultSystemConfig(),
+    archive: getDefaultCtrNandArchive(),
+    userData: getDefaultUserSaveData(),
+  };
+}
+
+// Aligns an offset up to a 512-byte media unit (sector) boundary
+function alignUp512(offset: number): number {
+  return (offset + 511) & ~511;
+}
+
+// Writes a clean human-readable ASCII/UTF-8 section after the tagged JSON payload (never covered by LCG junk)
+function writeReadableSection(
+  buf: Uint8Array,
+  startOffset: number,
+  maxEndOffset: number,
+  lines: string[]
+): number {
+  const aligned = alignUp512(startOffset);
+  if (aligned >= maxEndOffset) return aligned;
+  const textBytes = encodeUtf8(lines.join('\n') + '\n');
+  const writable = Math.min(textBytes.length, maxEndOffset - aligned);
+  if (writable > 0) {
+    buf.set(textBytes.subarray(0, writable), aligned);
+  }
+  return aligned + writable;
+}
+
+// Helper: build a tagged binary partition buffer with 32B header + CRC32 + readable JSON + erased 0xFF flash
+function buildTaggedBinary(magic: string, totalSize: number, payloadObj: unknown): Uint8Array {
+  const buf = new Uint8Array(totalSize);
+  buf.fill(0xff, 0x20); // Erased NAND flash state (no LCG pseudo-random junk filler)
+
+  let payloadBytes = encodeUtf8(JSON.stringify(payloadObj, null, 2) + '\n');
+  if (0x20 + payloadBytes.length > totalSize) {
+    payloadBytes = encodeUtf8(JSON.stringify(payloadObj));
+  }
   if (0x20 + payloadBytes.length > totalSize) {
     throw new Error(`Payload for ${magic} exceeds partition size (${payloadBytes.length} > ${totalSize})`);
   }
@@ -900,21 +977,13 @@ function buildTaggedBinary(magic: string, totalSize: number, payloadObj: unknown
   writeAsciiFixed(buf, 0x10, `CTR_${magic}_OK`, 16);
 
   buf.set(payloadBytes, 0x20);
-
-  // Fill remaining space with deterministic binary pattern (looks authentic in Hex Viewer)
-  let x = (fillerSeed * 2654435761) >>> 0;
-  for (let i = 0x20 + payloadBytes.length; i < totalSize; i++) {
-    if (i > totalSize - 4096) {
-      buf[i] = 0xff; // erased NAND flash tail
-    } else {
-      x = (1664525 * x + 1013904223) >>> 0;
-      buf[i] = (x >>> 24) & 0xff;
-    }
-  }
   return buf;
 }
 
-export function parseTaggedBinary<T>(buf: Uint8Array, expectedMagic: string): { ok: true; data: T; magic: string } | { ok: false; magic: string; reason: string } {
+export function parseTaggedBinary<T>(
+  buf: Uint8Array,
+  expectedMagic: string
+): { ok: true; data: T; magic: string } | { ok: false; magic: string; reason: string } {
   const magic = readAsciiFixed(buf, 0x00, 4);
   if (magic !== expectedMagic) {
     return {
@@ -961,228 +1030,659 @@ export function parseTaggedBinary<T>(buf: Uint8Array, expectedMagic: string): { 
   }
 }
 
-export function buildFirm0Partition(opcodes = getDefaultStage1Opcodes()): Uint8Array {
-  const size = getPartitionByteSize('firm0_boot1');
-  return buildTaggedBinary(
-    'FIRM',
-    size,
-    {
-      arm9Entry: '0x08006000',
-      arm11Entry: '0x1FF80000',
-      splVersion: 'BOOT9-FIRM-LOADER-1.4',
-      opcodes,
-    },
-    101
-  );
-}
+export function buildTwlPartition(data: TwlPartitionData = getDefaultTwlPartitionData()): Uint8Array {
+  const size = getPartitionByteSize('twl_nand');
+  const buf = buildTaggedBinary('TWL0', size, data);
+  const payloadEnd = 0x20 + readUint32LE(buf, 0x08);
+  const twlpOffset = (24 - 1) * CHUNK_SIZE; // Chunk 24 = TWLP start inside twl_nand
 
-export function parseFirm0Partition(buf: Uint8Array) {
-  return parseTaggedBinary<{
-    arm9Entry: string;
-    arm11Entry: string;
-    splVersion: string;
-    opcodes: Stage1Opcode[];
-  }>(buf, 'FIRM');
-}
+  writeReadableSection(buf, payloadEnd, twlpOffset, [
+    '=== TWL PARTITION VFS MANIFEST (NCSD[0]) ===',
+    `TWLN (${data.twlnFilesystem}, real ${data.twlnRealOffsetHex}): /sys/dev.kp /shared1 /shared2 /title/00030004`,
+    `TWLP (${data.twlpFilesystem}, real ${data.twlpRealOffsetHex}): /photo/ (${data.twlpPhotoSlots} slots) /sound/ (${data.twlpSoundSlots} slots)`,
+    `TWL System: ${data.twlSystemVersion}`,
+    `Installed DSiWare TIDs: ${data.dsiWareTitleIds.join(', ') || 'none'}`,
+  ]);
 
-export function buildFirm1Partition(header = getDefaultStage2Header()): Uint8Array {
-  const size = getPartitionByteSize('firm1_stage2');
-  return buildTaggedBinary('STG2', size, header, 202);
-}
-
-export function parseFirm1Partition(buf: Uint8Array) {
-  return parseTaggedBinary<BootStage2Header>(buf, 'STG2');
-}
-
-export function buildSysDataPartition(config = getDefaultSystemConfig()): Uint8Array {
-  const size = getPartitionByteSize('twl_sysdata');
-  return buildTaggedBinary('CFG0', size, config, 303);
-}
-
-export function parseSysDataPartition(buf: Uint8Array) {
-  const parsed = parseTaggedBinary<SystemConfig>(buf, 'CFG0');
-  if (parsed.ok) {
-    if (!parsed.data.language) parsed.data.language = 'en';
-    if (!parsed.data.identity) {
-      parsed.data.identity = getDefaultConsoleIdentity(parsed.data.region, parsed.data.serialNumber);
-    } else {
-      parsed.data.identity.secureInfoRegionByte = parsed.data.region;
-      parsed.data.identity.secureInfoSerial = parsed.data.serialNumber;
-    }
+  // Write clean FAT12 Volume Boot Record marker at TWLP boundary (chunk 24)
+  if (twlpOffset + 0x200 <= buf.length && payloadEnd < twlpOffset) {
+    buf.fill(0x00, twlpOffset, twlpOffset + 0x200);
+    buf[twlpOffset + 0x00] = 0xeb;
+    buf[twlpOffset + 0x01] = 0x3c;
+    buf[twlpOffset + 0x02] = 0x90;
+    writeAsciiFixed(buf, twlpOffset + 0x03, 'MSDOS5.0', 8);
+    buf[twlpOffset + 0x0b] = 0x00; // 512 bytes/sector
+    buf[twlpOffset + 0x0c] = 0x02;
+    buf[twlpOffset + 0x0d] = 0x04;
+    buf[twlpOffset + 0x15] = 0xf8;
+    writeAsciiFixed(buf, twlpOffset + 0x2b, 'TWLP_FAT12 ', 11);
+    writeAsciiFixed(buf, twlpOffset + 0x36, 'FAT12   ', 8);
+    buf[twlpOffset + 0x1fe] = 0x55;
+    buf[twlpOffset + 0x1ff] = 0xaa;
   }
-  return parsed;
-}
-
-export function buildCtrNandPartition(
-  archive: CtrNandArchiveData = getDefaultCtrNandArchive()
-): Uint8Array {
-  const size = getPartitionByteSize('ctrnand_sys');
-  return buildTaggedBinary('CND0', size, archive, 404);
-}
-
-export function parseCtrNandPartition(buf: Uint8Array) {
-  const parsed = parseTaggedBinary<CtrNandArchiveData>(buf, 'CND0');
-  if (parsed.ok) {
-    parsed.data.titles = (parsed.data.titles ?? []).filter(
-      (t) => (t.appletId as string) !== 'nand-tool'
-    );
-    // Auto-hydrate older v2 CTRNAND payloads lacking full packages/dbs
-    if (!parsed.data.packages || !parsed.data.dbs || !parsed.data.nandFsMeta) {
-      const defaults = getDefaultCtrNandArchive(
-        parsed.data.titles.length > 0 ? parsed.data.titles : getDefaultSystemTitles()
-      );
-      parsed.data.packages = parsed.data.packages ?? defaults.packages;
-      parsed.data.dbs = parsed.data.dbs ?? defaults.dbs;
-      parsed.data.nandFsMeta = parsed.data.nandFsMeta ?? defaults.nandFsMeta;
-    }
-  }
-  return parsed;
-}
-
-export function buildUserDataPartition(saveData = getDefaultUserSaveData()): Uint8Array {
-  const size = getPartitionByteSize('nand_userdata');
-  return buildTaggedBinary('USR0', size, saveData, 505);
-}
-
-export function parseUserDataPartition(buf: Uint8Array) {
-  const parsed = parseTaggedBinary<UserSaveData>(buf, 'USR0');
-  if (parsed.ok) {
-    // Strip legacy nand-tool references from previously formatted IndexedDB saves
-    parsed.data.slots = parsed.data.slots.map((slot) =>
-      slot.type === 'app' && (slot.appletId as string) === 'nand-tool' ? { type: 'empty' } : slot
-    );
-    for (const folder of Object.values(parsed.data.folders)) {
-      folder.items = folder.items.filter((id) => (id as string) !== 'nand-tool');
-    }
-    delete parsed.data.activity['nand-tool'];
-    if (!parsed.data.sysdataArchives) {
-      parsed.data.sysdataArchives = ['00010017 (HOME)', '00010022 (Activity)', '00010026 (CECD)'];
-    }
-    if (!parsed.data.extdataArchives) {
-      parsed.data.extdataArchives = ['0000008f (HOME Cache)', '00000217 (Mii Plaza)', '00000000 (Notes)'];
-    }
-  }
-  return parsed;
-}
-
-export interface NcsdPartitionRecord {
-  id: PartitionId;
-  startChunk: number;
-  endChunk: number;
-  sha256: string;
-}
-
-/**
- * Builds the authentic NCSD Master Header in Sector 0.
- * Offset 0x000..0x0FF: Real 256-byte RSA-2048 signature over the partition table (0x100..0x4FF).
- * Offset 0x100..0x103: Magic "NCSD"
- * Offset 0x104..0x107: Total NAND size in chunks (256)
- * Offset 0x108..0x11F: Media ID & Serial
- * Offset 0x120..0x123: Header CRC32
- * Offset 0x130..0x4FF: 5 Encrypted Partition Records (startChunk, endChunk, SHA-256 of encrypted bytes)
- */
-export async function buildNcsdHeader(
-  partitionBuffers: Record<Exclude<PartitionId, 'ncsd_hdr'>, Uint8Array>
-): Promise<Uint8Array> {
-  const size = getPartitionByteSize('ncsd_hdr');
-  const buf = new Uint8Array(size);
-
-  // 0x100: NCSD magic
-  writeAsciiFixed(buf, 0x100, 'NCSD', 4);
-  writeUint32LE(buf, 0x104, 256); // 256 chunks
-  writeUint32LE(buf, 0x108, CHUNK_SIZE); // 16384 bytes
-  writeAsciiFixed(buf, 0x10c, 'CTR-001-VIRTUAL', 20);
-
-  const orderedIds: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
-    'firm0_boot1',
-    'firm1_stage2',
-    'twl_sysdata',
-    'ctrnand_sys',
-    'nand_userdata',
-  ];
-
-  let entryOffset = 0x130;
-  for (const id of orderedIds) {
-    const spec = NAND_PARTITIONS.find((p) => p.id === id)!;
-    const hashHex = await computeSHA256Hex(partitionBuffers[id]);
-    writeAsciiFixed(buf, entryOffset, id, 16);
-    writeUint32LE(buf, entryOffset + 16, spec.startChunk);
-    writeUint32LE(buf, entryOffset + 20, spec.endChunk);
-    writeAsciiFixed(buf, entryOffset + 24, hashHex, 64);
-    entryOffset += 96;
-  }
-
-  // CRC32 over partition table 0x130..0x500
-  const tableCrc = computeCRC32(buf.slice(0x130, 0x500));
-  writeUint32LE(buf, 0x120, tableCrc);
-
-  buf[0x5fe] = 0x55;
-  buf[0x5ff] = 0xaa;
-
-  // Real RSA-2048 signing: Sign the partition table 0x100..0x500 using the Root CA Private Key
-  const sigBytes = await signRsa2048(buf.slice(0x100, 0x500));
-  buf.set(sigBytes, 0x00);
 
   return buf;
 }
 
-export async function buildNcsdHeaderFromHashes(
-  hashes: Record<Exclude<PartitionId, 'ncsd_hdr'>, string>
-): Promise<Uint8Array> {
-  const size = getPartitionByteSize('ncsd_hdr');
-  const buf = new Uint8Array(size);
+export function parseTwlPartition(buf: Uint8Array) {
+  return parseTaggedBinary<TwlPartitionData>(buf, 'TWL0');
+}
 
-  writeAsciiFixed(buf, 0x100, 'NCSD', 4);
-  writeUint32LE(buf, 0x104, 256);
-  writeUint32LE(buf, 0x108, CHUNK_SIZE);
-  writeAsciiFixed(buf, 0x10c, 'CTR-001-VIRTUAL', 20);
+export function buildAgbSavePartition(data: AgbSaveData = getDefaultAgbSaveData()): Uint8Array {
+  const size = getPartitionByteSize('agbsave'); // Exact 0x30000 = 192 KB
+  const buf = buildTaggedBinary('.SAV', size, data);
+  const payloadEnd = 0x20 + readUint32LE(buf, 0x08);
+  writeReadableSection(buf, payloadEnd, size, [
+    '=== AGBSAVE SCRATCHPAD (NCSD[1] · 0x30000 = 192 KB) ===',
+    `Real Offset: ${data.realOffsetHex} | Size: ${data.realSizeHex} | Title: ${data.titleId}`,
+    `Save Format: ${data.saveType} | Populated: ${String(data.populated)} | CMAC: ${data.cmacHex}`,
+    'Remaining erased flash bytes (0xFF) represent unprogrammed AGB_FIRM save space.',
+  ]);
+  return buf;
+}
 
-  const orderedIds: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
-    'firm0_boot1',
-    'firm1_stage2',
-    'twl_sysdata',
-    'ctrnand_sys',
-    'nand_userdata',
-  ];
+export function parseAgbSavePartition(buf: Uint8Array) {
+  return parseTaggedBinary<AgbSaveData>(buf, '.SAV');
+}
 
-  let entryOffset = 0x130;
-  for (const id of orderedIds) {
-    const spec = NAND_PARTITIONS.find((p) => p.id === id)!;
-    const hashHex = hashes[id] || '0'.repeat(64);
-    writeAsciiFixed(buf, entryOffset, id, 16);
-    writeUint32LE(buf, entryOffset + 16, spec.startChunk);
-    writeUint32LE(buf, entryOffset + 20, spec.endChunk);
-    writeAsciiFixed(buf, entryOffset + 24, hashHex, 64);
-    entryOffset += 96;
+export function buildFirmPartition(
+  slotName: 'FIRM0' | 'FIRM1' = 'FIRM0',
+  payload: FirmBinaryPayload = getDefaultFirmPayload(slotName)
+): Uint8Array {
+  const size = getPartitionByteSize(slotName === 'FIRM0' ? 'firm0' : 'firm1');
+  const fullPayload = { ...payload, slotName };
+  const buf = buildTaggedBinary('FIRM', size, fullPayload);
+  const payloadEnd = 0x20 + readUint32LE(buf, 0x08);
+  writeReadableSection(buf, payloadEnd, size, [
+    `=== ${slotName} (${fullPayload.splVersion}) KERNEL MANIFEST ===`,
+    `ARM9 Entry: ${fullPayload.arm9Entry} | ARM11 Entry: ${fullPayload.arm11Entry}`,
+    `Kernel: ${fullPayload.stage2Header.kernelVersion} (${fullPayload.stage2Header.buildTag})`,
+    `Autoboot HOME TID: ${fullPayload.stage2Header.autobootTitleId}`,
+    `Sysmodules: ${(fullPayload.stage2Header.sysmodules ?? []).join(', ')}`,
+    'Mounts:',
+    ...fullPayload.stage2Header.mountEntries.map(
+      (m) => `  ${m.mount.padEnd(20)} -> ${m.partition} (required=${String(m.required)})`
+    ),
+  ]);
+  return buf;
+}
+
+export function parseFirmPartition(buf: Uint8Array) {
+  return parseTaggedBinary<FirmBinaryPayload>(buf, 'FIRM');
+}
+
+function buildTaggedDbFile(magic: string, count: number, payload: unknown): Uint8Array {
+  const body = jsonToBytes(payload);
+  const out = new Uint8Array(16 + body.byteLength);
+  writeAsciiFixed(out, 0x00, magic, 4);
+  writeUint32LE(out, 0x04, 1); // DB format version
+  writeUint32LE(out, 0x08, count);
+  writeUint32LE(out, 0x0c, computeCRC32(body));
+  out.set(body, 0x10);
+  return out;
+}
+
+function parseTaggedDbFile<T>(bytes: Uint8Array | undefined, expectedMagic: string, label: string): T {
+  if (!bytes || bytes.byteLength < 16) {
+    throw new Error(`Missing CTRNAND database file ${label}`);
+  }
+  const magic = readAsciiFixed(bytes, 0x00, 4);
+  if (magic !== expectedMagic) {
+    throw new Error(`Corrupt DB magic in ${label} (expected "${expectedMagic}", found "${magic}")`);
+  }
+  const body = bytes.subarray(0x10);
+  const storedCrc = readUint32LE(bytes, 0x0c);
+  if (computeCRC32(body) !== storedCrc) {
+    throw new Error(`CRC32 mismatch inside ${label}`);
+  }
+  return JSON.parse(decodeUtf8(body)) as T;
+}
+
+function encodeSecureInfoA(config: SystemConfig): Uint8Array {
+  const out = new Uint8Array(288);
+  writeAsciiFixed(out, 0x00, 'CTR-SINF', 8);
+  out[0x100] = config.region === 'JPN' ? 0x00 : config.region === 'USA' ? 0x01 : 0x02;
+  writeAsciiFixed(out, 0x101, config.serialNumber.slice(0, 15), 15);
+  writeAsciiFixed(out, 0x110, config.region, 4);
+  return out;
+}
+
+function encodeLocalFriendCodeSeedB(identity: ConsoleIdentityFiles): Uint8Array {
+  const out = new Uint8Array(272);
+  writeAsciiFixed(out, 0x00, 'LFCS', 4);
+  const seedBytes = hexToBytes(identity.localFriendCodeSeedHex.padEnd(32, '0').slice(0, 32));
+  out.set(seedBytes.subarray(0, 16), 0x100);
+  return out;
+}
+
+function encodeMovableSed(identity: ConsoleIdentityFiles): Uint8Array {
+  const meta = jsonToBytes({ id0: identity.id0, id1: identity.id1 });
+  const out = new Uint8Array(Math.max(320, 0x120 + meta.byteLength));
+  writeAsciiFixed(out, 0x00, 'SEED', 4);
+  out[0x04] = 0x01; // initialized flag
+  const keyY = hexToBytes(identity.movableSedKeyHex.padEnd(32, '0').slice(0, 32));
+  out.set(keyY.subarray(0, 16), 0x110);
+  out.set(meta, 0x120);
+  return out;
+}
+
+function encodeTmdFile(tmd: TitlePackage['tmd']): Uint8Array {
+  const body = jsonToBytes(tmd);
+  const out = new Uint8Array(16 + body.byteLength);
+  writeAsciiFixed(out, 0x00, 'TMD0', 4);
+  writeUint32LE(out, 0x04, tmd.titleVersion);
+  writeUint32LE(out, 0x08, tmd.contentCount);
+  writeUint32LE(out, 0x0c, computeCRC32(body));
+  out.set(body, 0x10);
+  return out;
+}
+
+function encodeNcchAppFile(
+  pkg: TitlePackage,
+  app: TitlePackage['apps'][number],
+  appletEntry?: SystemTitleEntry
+): Uint8Array {
+  const manifestObj = {
+    app,
+    packageMeta: {
+      titleId: pkg.titleId,
+      titleIdHigh: pkg.titleIdHigh,
+      titleIdLow: pkg.titleIdLow,
+      productCode: pkg.productCode,
+      publisher: pkg.publisher,
+      shortName: pkg.shortName,
+      fullName: pkg.fullName,
+      mediaType: pkg.mediaType,
+      basePath: pkg.basePath,
+      appletId: pkg.appletId,
+      blocks: pkg.blocks,
+      description: pkg.description,
+    },
+    appletEntry: app.contentIndex === 0 ? appletEntry : undefined,
+  };
+  const body = jsonToBytes(manifestObj);
+  const out = new Uint8Array(0x200 + body.byteLength);
+
+  // Authentic NCCH header layout (0x000..0x1FF): "NCCH" magic at 0x100
+  writeAsciiFixed(out, 0x100, 'NCCH', 4);
+  writeUint32LE(out, 0x104, Math.ceil(out.byteLength / MEDIA_UNIT_SIZE)); // Content size in 0x200 MU
+  const tidBytes = hexToBytes(pkg.titleId.padStart(16, '0').slice(0, 16));
+  out.set(tidBytes, 0x108); // Partition ID
+  writeAsciiFixed(out, 0x110, app.makerCode || '01', 2);
+  out[0x112] = 0x02; // NCCH v2
+  out.set(tidBytes, 0x118); // Program ID
+  writeAsciiFixed(out, 0x150, pkg.productCode.slice(0, 16), 16);
+  writeUint32LE(out, 0x188, computeCRC32(body)); // ExeFS/Manifest digest check
+
+  out.set(body, 0x200);
+  return out;
+}
+
+export function buildCtrNandVolumePartition(
+  volume: CtrNandVolumeData = getDefaultCtrNandVolume()
+): Uint8Array {
+  const size = getPartitionByteSize('ctrnand');
+  const config: SystemConfig = {
+    ...volume.config,
+    identity:
+      volume.config.identity ??
+      getDefaultConsoleIdentity(volume.config.region, volume.config.serialNumber),
+  };
+  const id = config.identity!;
+  const titlesByApplet = new Map<string, SystemTitleEntry>();
+  for (const t of volume.archive.titles) {
+    titlesByApplet.set(t.appletId, t);
   }
 
-  const tableCrc = computeCRC32(buf.slice(0x130, 0x500));
-  writeUint32LE(buf, 0x120, tableCrc);
+  const files: Fat16BuildFile[] = [];
 
-  buf[0x5fe] = 0x55;
-  buf[0x5ff] = 0xaa;
+  // 1. /rw/sys/ & /private/ console identity & configuration
+  files.push({ path: '/rw/sys/SecureInfo_A', data: encodeSecureInfoA(config), readOnly: true });
+  files.push({
+    path: '/rw/sys/LocalFriendCodeSeed_B',
+    data: encodeLocalFriendCodeSeedB(id),
+    readOnly: true,
+  });
+  files.push({
+    path: '/rw/sys/config.json',
+    data: jsonToBytes({
+      ownerName: config.ownerName,
+      language: config.language,
+      region: config.region,
+      serialNumber: config.serialNumber,
+      firmwareVersion: config.firmwareVersion,
+      themeId: config.themeId,
+      gridRows: config.gridRows,
+      brightness: config.brightness,
+      soundEnabled: config.soundEnabled,
+      wirelessEnabled: config.wirelessEnabled,
+      playCoins: config.playCoins,
+      totalSteps: config.totalSteps,
+      bootCount: config.bootCount,
+    }),
+  });
+  files.push({ path: '/private/movable.sed', data: encodeMovableSed(id), readOnly: true });
 
-  const sigBytes = await signRsa2048(buf.slice(0x100, 0x500));
+  // 2. /dbs/ databases (title.db, import.db, ticket.db, certs.db)
+  files.push({
+    path: '/dbs/title.db',
+    data: buildTaggedDbFile('TDB0', volume.archive.dbs.titleDb.length, volume.archive.dbs.titleDb),
+  });
+  files.push({
+    path: '/dbs/import.db',
+    data: buildTaggedDbFile('IDB0', volume.archive.dbs.importDb.length, volume.archive.dbs.importDb),
+  });
+  files.push({
+    path: '/dbs/ticket.db',
+    data: buildTaggedDbFile('TIKD', volume.archive.dbs.ticketDb.length, volume.archive.dbs.ticketDb),
+  });
+  files.push({
+    path: '/dbs/certs.db',
+    data: buildTaggedDbFile('CERT', volume.archive.dbs.certsDb.length, volume.archive.dbs.certsDb),
+    readOnly: true,
+  });
+
+  // 3. Actual OS & Applet Title Packages under /title/<TID_High>/<TID_Low>/content/
+  for (const pkg of volume.archive.packages) {
+    const contentDir = `/title/${pkg.titleIdHigh}/${pkg.titleIdLow}/content`;
+    files.push({
+      path: `${contentDir}/${pkg.tmd.fileName}`,
+      data: encodeTmdFile(pkg.tmd),
+    });
+    const appletEntry = pkg.appletId ? titlesByApplet.get(pkg.appletId) : undefined;
+    for (const app of pkg.apps) {
+      files.push({
+        path: `${contentDir}/${app.fileName}`,
+        data: encodeNcchAppFile(pkg, app, appletEntry),
+      });
+    }
+  }
+
+  // 4. User SysData & ExtData under /data/<ID0>/
+  const dataRoot = `/data/${id.id0}`;
+  files.push({
+    path: `${dataRoot}/sysdata/00010017/home.json`,
+    data: jsonToBytes({
+      homeMenuTitleId: volume.archive.homeMenuTitleId,
+      sharedFontHash: volume.archive.sharedFontHash,
+      slots: volume.userData.slots,
+      folders: volume.userData.folders,
+      sysdataArchives: volume.userData.sysdataArchives ?? [
+        '00010017 (HOME)',
+        '00010022 (Activity)',
+        '00010026 (CECD)',
+      ],
+    }),
+  });
+  files.push({
+    path: `${dataRoot}/sysdata/00010022/activity.json`,
+    data: jsonToBytes(volume.userData.activity),
+  });
+  files.push({
+    path: `${dataRoot}/extdata/00000000/notes.json`,
+    data: jsonToBytes({
+      notes: volume.userData.notes,
+      extdataArchives: volume.userData.extdataArchives ?? [
+        '0000008f (HOME Cache)',
+        '00000217 (Mii Plaza)',
+        '00000000 (Notes)',
+      ],
+    }),
+  });
+  files.push({
+    path: `${dataRoot}/extdata/00000217/miis.json`,
+    data: jsonToBytes(volume.userData.miis),
+  });
+  files.push({
+    path: `${dataRoot}/extdata/0000055d/audio_game.json`,
+    data: jsonToBytes({
+      synthPattern: volume.userData.synthPattern,
+      cartridgeHighScore: volume.userData.cartridgeHighScore,
+      nandFsMeta: volume.archive.nandFsMeta,
+    }),
+  });
+
+  return buildFat16MbrImage(size, 'CTR', files);
+}
+
+export function parseCtrNandVolumePartition(
+  buf: Uint8Array
+): { ok: true; data: CtrNandVolumeData; magic: string } | { ok: false; magic: string; reason: string } {
+  const fat = parseFat16MbrImage(buf);
+  if (!fat.ok) {
+    return {
+      ok: false,
+      magic: readAsciiFixed(buf, 0x236, 5) || '----',
+      reason: fat.reason,
+    };
+  }
+  if (fat.volumeLabel !== 'CTR') {
+    return {
+      ok: false,
+      magic: fat.filesystemType,
+      reason: `Unexpected FAT16 volume label "${fat.volumeLabel}" (expected "CTR")`,
+    };
+  }
+
+  try {
+    // 1. Parse /rw/sys/ & /private/movable.sed
+    const secInfo = fat.files.get('/rw/sys/SecureInfo_A');
+    if (!secInfo || readAsciiFixed(secInfo, 0x00, 8) !== 'CTR-SINF') {
+      throw new Error('Missing or corrupt /rw/sys/SecureInfo_A');
+    }
+    const regionByte = secInfo[0x100];
+    const secRegion: 'USA' | 'EUR' | 'JPN' =
+      regionByte === 0x00 ? 'JPN' : regionByte === 0x02 ? 'EUR' : 'USA';
+    const secSerial = readAsciiFixed(secInfo, 0x101, 15) || 'CW70492184';
+
+    const lfcsBytes = fat.files.get('/rw/sys/LocalFriendCodeSeed_B');
+    if (!lfcsBytes || readAsciiFixed(lfcsBytes, 0x00, 4) !== 'LFCS') {
+      throw new Error('Missing or corrupt /rw/sys/LocalFriendCodeSeed_B');
+    }
+    const lfcsHex = bytesToHex(lfcsBytes.subarray(0x100, 0x110));
+
+    const movableBytes = fat.files.get('/private/movable.sed');
+    if (!movableBytes || readAsciiFixed(movableBytes, 0x00, 4) !== 'SEED') {
+      throw new Error('Missing or corrupt /private/movable.sed');
+    }
+    const movableSedKeyHex = bytesToHex(movableBytes.subarray(0x110, 0x120));
+    const movableMeta = JSON.parse(decodeUtf8(movableBytes.subarray(0x120))) as {
+      id0: string;
+      id1: string;
+    };
+
+    const configBytes = fat.files.get('/rw/sys/config.json');
+    if (!configBytes) throw new Error('Missing /rw/sys/config.json');
+    const rawConfig = JSON.parse(decodeUtf8(configBytes)) as SystemConfig;
+
+    const config: SystemConfig = {
+      ...rawConfig,
+      region: rawConfig.region ?? secRegion,
+      serialNumber: rawConfig.serialNumber ?? secSerial,
+      language: rawConfig.language ?? 'en',
+      identity: {
+        id0: movableMeta.id0,
+        id1: movableMeta.id1,
+        movableSedKeyHex,
+        secureInfoRegionByte: rawConfig.region ?? secRegion,
+        secureInfoSerial: rawConfig.serialNumber ?? secSerial,
+        localFriendCodeSeedHex: lfcsHex,
+      },
+    };
+
+    // 2. Parse /dbs/*.db
+    const titleDb = parseTaggedDbFile<TitleDatabaseEntry[]>(
+      fat.files.get('/dbs/title.db'),
+      'TDB0',
+      '/dbs/title.db'
+    );
+    const importDb = parseTaggedDbFile<TitleDatabaseEntry[]>(
+      fat.files.get('/dbs/import.db'),
+      'IDB0',
+      '/dbs/import.db'
+    );
+    const ticketDb = parseTaggedDbFile<TitleTicket[]>(
+      fat.files.get('/dbs/ticket.db'),
+      'TIKD',
+      '/dbs/ticket.db'
+    );
+    const certsDb = parseTaggedDbFile<CertChainEntry[]>(
+      fat.files.get('/dbs/certs.db'),
+      'CERT',
+      '/dbs/certs.db'
+    );
+
+    // 3. Reconstruct OS & Applet TitlePackages + SystemTitleEntry[] directly from /title/<High>/<Low>/content/
+    const contentBuckets = new Map<
+      string,
+      { tmd?: TitleMetadataTmd; apps: NcchAppFile[]; pkgMeta?: Omit<TitlePackage, 'tmd' | 'apps'>; applet?: SystemTitleEntry }
+    >();
+
+    for (const [path, fileBytes] of fat.files.entries()) {
+      const m = /^\/title\/([0-9A-Fa-f]{8})\/([0-9A-Fa-f]{8})\/content\/(.+)$/.exec(path);
+      if (!m) continue;
+      const tidKey = `${m[1].toUpperCase()}${m[2].toUpperCase()}`;
+      let bucket = contentBuckets.get(tidKey);
+      if (!bucket) {
+        bucket = { apps: [] };
+        contentBuckets.set(tidKey, bucket);
+      }
+      const fname = m[3];
+      if (fname.endsWith('.tmd')) {
+        bucket.tmd = parseTaggedDbFile<TitleMetadataTmd>(fileBytes, 'TMD0', path);
+      } else if (fname.endsWith('.app')) {
+        if (fileBytes.byteLength < 0x200 || readAsciiFixed(fileBytes, 0x100, 4) !== 'NCCH') {
+          throw new Error(`Invalid NCCH magic inside ${path}`);
+        }
+        const body = fileBytes.subarray(0x200);
+        if (computeCRC32(body) !== readUint32LE(fileBytes, 0x188)) {
+          throw new Error(`NCCH payload CRC32 mismatch inside ${path}`);
+        }
+        const parsedApp = JSON.parse(decodeUtf8(body)) as {
+          app: NcchAppFile;
+          packageMeta: Omit<TitlePackage, 'tmd' | 'apps'>;
+          appletEntry?: SystemTitleEntry;
+        };
+        bucket.apps.push(parsedApp.app);
+        if (!bucket.pkgMeta) bucket.pkgMeta = parsedApp.packageMeta;
+        if (parsedApp.appletEntry) bucket.applet = parsedApp.appletEntry;
+      }
+    }
+
+    const packages: TitlePackage[] = [];
+    const titles: SystemTitleEntry[] = [];
+    for (const bucket of contentBuckets.values()) {
+      if (bucket.tmd && bucket.pkgMeta) {
+        bucket.apps.sort((a, b) => a.contentIndex - b.contentIndex);
+        packages.push({
+          ...bucket.pkgMeta,
+          tmd: bucket.tmd,
+          apps: bucket.apps,
+        });
+      }
+      if (bucket.applet && (bucket.applet.appletId as string) !== 'nand-tool') {
+        titles.push(bucket.applet);
+      }
+    }
+    if (packages.length === 0) {
+      throw new Error('CTRNAND FAT16 /title/ directory contains zero valid title packages');
+    }
+
+    // 4. Parse /data/<ID0>/ User SysData & ExtData
+    const dataRoot = `/data/${movableMeta.id0}`;
+    const homeFile = fat.files.get(`${dataRoot}/sysdata/00010017/home.json`);
+    const activityFile = fat.files.get(`${dataRoot}/sysdata/00010022/activity.json`);
+    const notesFile = fat.files.get(`${dataRoot}/extdata/00000000/notes.json`);
+    const miisFile = fat.files.get(`${dataRoot}/extdata/00000217/miis.json`);
+    const audioGameFile = fat.files.get(`${dataRoot}/extdata/0000055d/audio_game.json`);
+
+    if (!homeFile || !activityFile || !notesFile || !miisFile || !audioGameFile) {
+      throw new Error(`Missing user data archives under ${dataRoot}`);
+    }
+
+    const homeJson = JSON.parse(decodeUtf8(homeFile)) as {
+      homeMenuTitleId: string;
+      sharedFontHash: string;
+      slots: UserSaveData['slots'];
+      folders: UserSaveData['folders'];
+      sysdataArchives: string[];
+    };
+    const activity = JSON.parse(decodeUtf8(activityFile)) as UserSaveData['activity'];
+    const notesJson = JSON.parse(decodeUtf8(notesFile)) as {
+      notes: UserSaveData['notes'];
+      extdataArchives: string[];
+    };
+    const miis = JSON.parse(decodeUtf8(miisFile)) as UserSaveData['miis'];
+    const audioGameJson = JSON.parse(decodeUtf8(audioGameFile)) as {
+      synthPattern: number[];
+      cartridgeHighScore: number;
+      nandFsMeta: CtrNandArchiveData['nandFsMeta'];
+    };
+
+    const userData: UserSaveData = {
+      slots: homeJson.slots.map((slot) =>
+        slot.type === 'app' && (slot.appletId as string) === 'nand-tool' ? { type: 'empty' } : slot
+      ),
+      folders: homeJson.folders,
+      notes: notesJson.notes,
+      activity,
+      miis,
+      synthPattern: audioGameJson.synthPattern,
+      cartridgeHighScore: audioGameJson.cartridgeHighScore,
+      sysdataArchives: homeJson.sysdataArchives,
+      extdataArchives: notesJson.extdataArchives,
+    };
+
+    const archive: CtrNandArchiveData = {
+      homeMenuTitleId: homeJson.homeMenuTitleId,
+      sharedFontHash: homeJson.sharedFontHash,
+      titles,
+      packages,
+      dbs: { titleDb, importDb, ticketDb, certsDb },
+      nandFsMeta: audioGameJson.nandFsMeta,
+    };
+
+    return {
+      ok: true,
+      magic: fat.filesystemType,
+      data: { config, archive, userData },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      magic: fat.filesystemType,
+      reason: err instanceof Error ? err.message : 'Failed reading CTRNAND FAT16 files',
+    };
+  }
+}
+
+export interface NcsdPartitionTableEntry {
+  index: number;
+  partitionId: PartitionId;
+  offsetMu: number;
+  lengthMu: number;
+  fsType: number;
+  cryptType: number;
+}
+
+export interface TwlMbrEntry {
+  name: 'TWLN' | 'TWLP';
+  filesystem: 'FAT16' | 'FAT12';
+  typeByte: number;
+  startLba: number;
+  sectorCount: number;
+}
+
+/**
+ * Builds the authentic 3DS NAND NCSD Header in Sector 0 (0x000..0x1FF):
+ *  - 0x000..0x0FF (256B): RSA-2048 signature over 0x100..0x1FF (Sim Boot9 NAND Key)
+ *  - 0x100..0x103 (4B):   "NCSD" magic
+ *  - 0x104..0x107 (4B):   Total NAND size in 0x200-byte media units (0x2000 = 4.00 MB image)
+ *  - 0x108..0x10F (8B):   Media ID = 0 (all zeros for NAND)
+ *  - 0x110..0x117 (8B):   FS-Type table [0x01=TWL, 0x04=AGBSAVE, 0x03=FIRM0, 0x03=FIRM1, 0x01=CTRNAND, 0, 0, 0]
+ *  - 0x118..0x11F (8B):   Crypt-Type table [0x01=TWL, 0x02=CTR, 0x02, 0x02, 0x02, 0, 0, 0]
+ *  - 0x120..0x15F (64B):  8-entry (offset_mu, length_mu) partition table in media units
+ *  - 0x160..0x1BD (94B):  Zeroed reserved bytes
+ *  - 0x1BE..0x1FF (66B):  AES-128-CTR encrypted TWL MBR (Keyslot 0x03 + TWL CID CTR):
+ *                           - Entry 0: TWLN (FAT16, type 0x06, LBA 32..767)
+ *                           - Entry 1: TWLP (FAT12, type 0x01, LBA 768..1023)
+ *                           - 0x1FE..0x1FF: 0x55 0xAA boot signature (encrypted inside MBR!)
+ */
+export async function buildNcsdHeader(): Promise<Uint8Array> {
+  const size = getPartitionByteSize('ncsd_hdr');
+  const buf = new Uint8Array(size);
+  const musPerChunk = CHUNK_SIZE / MEDIA_UNIT_SIZE; // 32 media units per 16 KB chunk
+
+  // 0x100: Magic & total media units
+  writeAsciiFixed(buf, 0x100, 'NCSD', 4);
+  writeUint32LE(buf, 0x104, TOTAL_CHUNKS * musPerChunk); // 0x2000 MU (4.00 MB)
+  // 0x108..0x10F remains 0 (Media ID = 0 for NAND)
+
+  // 0x110..0x117: FS-type table, 0x118..0x11F: Crypt-type table, 0x120..0x15F: (offset, len) in MU
+  const ncsdSpecs = NAND_PARTITIONS.filter((p) => p.ncsdIndex !== undefined).sort(
+    (a, b) => (a.ncsdIndex ?? 0) - (b.ncsdIndex ?? 0)
+  );
+
+  for (const spec of ncsdSpecs) {
+    const idx = spec.ncsdIndex!;
+    buf[0x110 + idx] = spec.ncsdFsType ?? 0;
+    buf[0x118 + idx] = spec.ncsdCryptType ?? 0;
+    // NCSD[0] (TWL) starts at LBA 0 (0x0) spanning chunks 0..31 (0x400 MU)
+    const offsetMu = spec.id === 'twl_nand' ? 0 : spec.startChunk * musPerChunk;
+    const endChunk = spec.endChunk;
+    const lengthMu =
+      spec.id === 'twl_nand'
+        ? (endChunk + 1) * musPerChunk
+        : (endChunk - spec.startChunk + 1) * musPerChunk;
+    writeUint32LE(buf, 0x120 + idx * 8, offsetMu);
+    writeUint32LE(buf, 0x120 + idx * 8 + 4, lengthMu);
+  }
+
+  // 0x1BE..0x1FF (66 bytes): Plaintext TWL MBR -> encrypted with Keyslot 0x03 + TWL CID CTR!
+  const mbrPlain = new Uint8Array(66);
+  // Entry 0 (TWLN FAT16, type 0x06): chunks 1..23 -> LBA 32, len 736 sectors
+  mbrPlain[0x04] = 0x06; // FAT16
+  writeUint32LE(mbrPlain, 0x08, 32);
+  writeUint32LE(mbrPlain, 0x0c, 23 * musPerChunk);
+  // Entry 1 (TWLP FAT12, type 0x01): chunks 24..31 -> LBA 768, len 256 sectors
+  mbrPlain[0x10 + 0x04] = 0x01; // FAT12
+  writeUint32LE(mbrPlain, 0x10 + 0x08, 24 * musPerChunk);
+  writeUint32LE(mbrPlain, 0x10 + 0x0c, 8 * musPerChunk);
+  // Authentic MBR boot signature 0x55 0xAA at 0x1FE..0x1FF (relative offset 64..65 in mbrPlain)
+  mbrPlain[64] = 0x55;
+  mbrPlain[65] = 0xaa;
+
+  const mbrEncrypted = await cryptTwlMbrBytes(mbrPlain);
+  buf.set(mbrEncrypted, 0x1be);
+
+  // Sign 0x100..0x1FF (authentic 256-byte NCSD header body) into 0x000..0x0FF
+  const sigBytes = await signRsa2048(buf.slice(0x100, 0x200));
   buf.set(sigBytes, 0x00);
+
+  // Fill remainder of Chunk 0 (0x200..0x3FFF) with erased flash (0xFF) plus a compact readable map at 0x200
+  buf.fill(0xff, 0x200);
+  writeReadableSection(buf, 0x200, size, [
+    '=== CTR-SIM eMMC NCSD PARTITION MAP (Sector 0 @ 0x000..0x1FF) ===',
+    `NAND_CID: ${getNandCidHex().toUpperCase()}`,
+    `NCSD Signed Range: 0x100..0x1FF (SIM_BOOT9_NAND_KEY) | TWL MBR: 0x1BE..0x1FF (Keyslot 0x03)`,
+    ...NAND_PARTITIONS.filter((p) => p.id !== 'ncsd_hdr').map(
+      (p) =>
+        `  NCSD[${p.ncsdIndex}] ${p.name.padEnd(8)} | Sim: ch ${String(p.startChunk).padStart(3)}..${String(p.endChunk).padStart(3)} (0x${(p.startChunk * CHUNK_SIZE).toString(16).padStart(6, '0')}) | Real Old3DS: ${p.realOffsetHex} (${p.realSizeHex}) | ${p.keyslotHex}`
+    ),
+  ]);
 
   return buf;
 }
 
 export async function parseNcsdHeader(
   buf: Uint8Array
-): Promise<{ ok: true; magic: string; records: Record<string, NcsdPartitionRecord> } | { ok: false; magic: string; reason: string }> {
-  // Validate real RSA-2048 signature in first 256 bytes over partition table (0x100..0x500)
+): Promise<
+  | {
+      ok: true;
+      magic: string;
+      totalMediaUnits: number;
+      entries: NcsdPartitionTableEntry[];
+      mbrEntries: TwlMbrEntry[];
+    }
+  | { ok: false; magic: string; reason: string }
+> {
+  if (buf.byteLength < 0x200) {
+    return { ok: false, magic: '', reason: 'Sector 0 truncated (< 512 bytes)' };
+  }
+
+  // 1. Verify RSA-2048 signature at 0x000..0x0FF over exact NCSD header body 0x100..0x1FF
   const signature = buf.slice(0x00, 0x100);
-  const signedData = buf.slice(0x100, 0x500);
-  const rsaValid = await verifyRsa2048(signature, signedData);
+  const signedBody = buf.slice(0x100, 0x200);
+  const rsaValid = await verifyRsa2048(signature, signedBody);
   if (!rsaValid) {
     return {
       ok: false,
       magic: readAsciiFixed(buf, 0x100, 4),
-      reason: 'Boot9 RSA-2048 signature verification failed (root trust chain broken)',
+      reason: 'Boot9 RSA-2048 signature verification failed over 0x100..0x1FF',
     };
   }
 
+  // 2. Validate NCSD magic & Media Units
   const magic = readAsciiFixed(buf, 0x100, 4);
   if (magic !== 'NCSD') {
     return {
@@ -1191,34 +1691,71 @@ export async function parseNcsdHeader(
       reason: `NCSD magic missing at 0x100 (expected "NCSD", found "${magic || '0x0000'}")`,
     };
   }
-  const chunkCount = readUint32LE(buf, 0x104);
-  if (chunkCount !== 256) {
+
+  const musPerChunk = CHUNK_SIZE / MEDIA_UNIT_SIZE;
+  const expectedMus = TOTAL_CHUNKS * musPerChunk;
+  const totalMediaUnits = readUint32LE(buf, 0x104);
+  if (totalMediaUnits !== expectedMus) {
     return {
       ok: false,
       magic,
-      reason: `Invalid NAND chunk geometry in NCSD header (${chunkCount} chunks)`,
-    };
-  }
-  const storedCrc = readUint32LE(buf, 0x120);
-  const actualCrc = computeCRC32(buf.slice(0x130, 0x500));
-  if (storedCrc !== actualCrc) {
-    return {
-      ok: false,
-      magic,
-      reason: `NCSD partition table CRC32 mismatch (0x${actualCrc.toString(16).toUpperCase()} != 0x${storedCrc.toString(16).toUpperCase()})`,
+      reason: `Invalid NCSD media unit count (${totalMediaUnits}, expected ${expectedMus})`,
     };
   }
 
-  const records: Record<string, NcsdPartitionRecord> = {};
-  let entryOffset = 0x130;
+  // 3. Parse 8-entry FS-Type (0x110), Crypt-Type (0x118), and (offset, length) table (0x120..0x15F)
+  const expectedOrder: PartitionId[] = ['twl_nand', 'agbsave', 'firm0', 'firm1', 'ctrnand'];
+  const entries: NcsdPartitionTableEntry[] = [];
   for (let i = 0; i < 5; i++) {
-    const id = readAsciiFixed(buf, entryOffset, 16) as PartitionId;
-    const startChunk = readUint32LE(buf, entryOffset + 16);
-    const endChunk = readUint32LE(buf, entryOffset + 20);
-    const sha256 = readAsciiFixed(buf, entryOffset + 24, 64);
-    records[id] = { id, startChunk, endChunk, sha256 };
-    entryOffset += 96;
+    const pid = expectedOrder[i];
+    const spec = NAND_PARTITIONS.find((p) => p.id === pid)!;
+    const offsetMu = readUint32LE(buf, 0x120 + i * 8);
+    const lengthMu = readUint32LE(buf, 0x120 + i * 8 + 4);
+    const fsType = buf[0x110 + i];
+    const cryptType = buf[0x118 + i];
+    const expOff = pid === 'twl_nand' ? 0 : spec.startChunk * musPerChunk;
+    const expLen =
+      pid === 'twl_nand'
+        ? (spec.endChunk + 1) * musPerChunk
+        : (spec.endChunk - spec.startChunk + 1) * musPerChunk;
+    if (offsetMu !== expOff || lengthMu !== expLen || fsType !== spec.ncsdFsType) {
+      return {
+        ok: false,
+        magic,
+        reason: `NCSD[${i}] geometry/FS mismatch for ${spec.name}`,
+      };
+    }
+    entries.push({ index: i, partitionId: pid, offsetMu, lengthMu, fsType, cryptType });
   }
 
-  return { ok: true, magic, records };
+  // 4. Decrypt encrypted TWL MBR at 0x1BE..0x1FF using Keyslot 0x03 + TWL CID CTR & verify 0x55 0xAA at 0x1FE
+  const mbrEncrypted = buf.slice(0x1be, 0x200);
+  const mbrPlain = await cryptTwlMbrBytes(mbrEncrypted);
+  if (mbrPlain[64] !== 0x55 || mbrPlain[65] !== 0xaa) {
+    return {
+      ok: false,
+      magic,
+      reason: `TWL MBR decrypt/signature fault at 0x1FE (got 0x${mbrPlain[64].toString(16)}${mbrPlain[65].toString(16)}, expected 0x55AA — wrong NAND CID or Keyslot 0x03)`,
+    };
+  }
+
+  const mbrEntries: TwlMbrEntry[] = [
+    {
+      name: 'TWLN',
+      filesystem: 'FAT16',
+      typeByte: mbrPlain[0x04],
+      startLba: readUint32LE(mbrPlain, 0x08),
+      sectorCount: readUint32LE(mbrPlain, 0x0c),
+    },
+    {
+      name: 'TWLP',
+      filesystem: 'FAT12',
+      typeByte: mbrPlain[0x10 + 0x04],
+      startLba: readUint32LE(mbrPlain, 0x10 + 0x08),
+      sectorCount: readUint32LE(mbrPlain, 0x10 + 0x0c),
+    },
+  ];
+
+  return { ok: true, magic, totalMediaUnits, entries, mbrEntries };
 }
+

@@ -192,14 +192,14 @@ class SimulatedRamController {
   }
 
   /**
-   * Stage 2 / Runtime: Caches decrypted TWL_SYSDATA in resident FCRAM.
+   * Stage 2 / Runtime: Caches decrypted CTRNAND /rw/sys/ config in resident FCRAM.
    */
   writeSystemConfigCache(config: SystemConfig): void {
     const encoded = textEncoder.encode(JSON.stringify(config));
     this.configCache = config;
-    this.allocations.set('cfg_twl_sysdata', {
-      id: 'cfg_twl_sysdata',
-      label: 'TWL_SYSDATA Cache',
+    this.allocations.set('cfg_ctrnand_rwsys', {
+      id: 'cfg_ctrnand_rwsys',
+      label: 'CTRNAND /rw/sys/ Cache',
       region: 'HOME_CACHE',
       addressHex: '0x20800000',
       bytes: Math.max(512 * 1024, Math.ceil(encoded.byteLength / 4096) * 4096),
@@ -287,14 +287,14 @@ class SimulatedRamController {
   }
 
   /**
-   * Stage 2 / Runtime: Caches decrypted NAND_USERDATA (slots, folders, Miis, notes, activity) in FCRAM.
+   * Stage 2 / Runtime: Caches decrypted CTRNAND /data/<ID0>/ (slots, folders, Miis, notes, activity) in FCRAM.
    */
   writeUserDataCache(userData: UserSaveData): void {
     const encoded = textEncoder.encode(JSON.stringify(userData));
     this.userDataCache = userData;
-    this.allocations.set('usr_nand_userdata', {
-      id: 'usr_nand_userdata',
-      label: 'NAND_USERDATA Save Cache',
+    this.allocations.set('usr_ctrnand_data', {
+      id: 'usr_ctrnand_data',
+      label: 'CTRNAND /data/<ID0>/ Cache',
       region: 'HOME_CACHE',
       addressHex: '0x21C00000',
       bytes: Math.max(1024 * 1024, Math.ceil(encoded.byteLength / 4096) * 4096),

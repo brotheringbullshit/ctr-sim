@@ -2,49 +2,55 @@ import {
   CHUNK_SIZE,
   ChunkIOEvent,
   CtrNandArchiveData,
+  CtrNandVolumeData,
+  DataPartitionId,
   NAND_PARTITIONS,
   PartitionId,
-  TOTAL_CHUNKS,
   SystemConfig,
+  TOTAL_CHUNKS,
   UserSaveData,
 } from './types';
 import {
-  buildCtrNandPartition,
-  buildFirm0Partition,
-  buildFirm1Partition,
+  buildAgbSavePartition,
+  buildCtrNandVolumePartition,
+  buildFirmPartition,
   buildNcsdHeader,
-  buildNcsdHeaderFromHashes,
-  buildSysDataPartition,
-  buildUserDataPartition,
-  parseCtrNandPartition,
-  parseFirm0Partition,
-  parseFirm1Partition,
-  parseNcsdHeader,
-  parseSysDataPartition,
-  parseUserDataPartition,
-  getDefaultStage1Opcodes,
-  getDefaultStage2Header,
-  getDefaultSystemConfig,
+  buildTwlPartition,
+  getDefaultAgbSaveData,
   getDefaultCtrNandArchive,
+  getDefaultCtrNandVolume,
+  getDefaultFirmPayload,
+  getDefaultSystemConfig,
+  getDefaultTwlPartitionData,
   getDefaultUserSaveData,
+  parseAgbSavePartition,
+  parseCtrNandVolumePartition,
+  parseFirmPartition,
+  parseNcsdHeader,
+  parseTwlPartition,
 } from './payloads';
 import {
   applyKeyslotOverrides,
   bytesToHex,
-  computeSHA256Hex,
+  cryptTwlMbrBytes,
   CTR_KEYSLOTS,
   decryptPartition,
   encryptPartition,
+  generateFreshNandCid,
+  getNandCidBytes,
+  getNandCidHex,
   hexToBytes,
   PartitionKeyOverrideMap,
   readAsciiFixed,
   resetDefaultKeyslots,
+  setNandCid,
 } from './crypto';
 
 const DB_NAME = 'CTR_SIM_VIRTUAL_NAND_V1';
 const DB_VERSION = 1;
 const STORE_CHUNKS = 'nand_chunks';
 const STORE_META = 'nand_meta';
+const CURRENT_CRYPTO_VERSION = 5;
 
 export interface StoredChunkRecord {
   chunkIndex: number;
@@ -61,13 +67,13 @@ export function getPartitionForChunk(chunkIndex: number): PartitionId {
       return spec.id;
     }
   }
-  return 'nand_userdata';
+  return 'ctrnand';
 }
 
 class NandIDBDriver {
   private dbPromise: Promise<IDBDatabase> | null = null;
   private listeners = new Set<IOListener>();
-  // Serialized async write queue to prevent concurrent save races against NCSD digests
+  // Serialized async write queue to prevent concurrent save races
   private writeQueue: Promise<void> = Promise.resolve();
 
   subscribeIO(listener: IOListener): () => void {
@@ -132,7 +138,8 @@ class NandIDBDriver {
         metaFlag = Boolean(metaReq.result?.value);
         cryptoVersion = metaReq.result?.cryptoVersion ?? 0;
       };
-      tx.oncomplete = () => resolve(metaFlag && cryptoVersion === 2 && chunkCount === TOTAL_CHUNKS);
+      tx.oncomplete = () =>
+        resolve(metaFlag && cryptoVersion === CURRENT_CRYPTO_VERSION && chunkCount === TOTAL_CHUNKS);
       tx.onerror = () => reject(tx.error);
     });
   }
@@ -216,134 +223,91 @@ class NandIDBDriver {
     });
   }
 
-  /**
-   * Recomputes NCSD_HDR SHA-256 digests. If modifiedPartitionId & modifiedCiphertext are provided,
-   * reuses existing hashes from current NCSD header for unmodified partitions without reading all chunks.
-   */
-  async syncNcsdDigests(modifiedPartitionId?: PartitionId, modifiedCiphertext?: Uint8Array): Promise<void> {
+  private async readCurrentCtrNandVolume(): Promise<CtrNandVolumeData> {
     try {
-      const ncsdChunk = await this.readChunk(0);
-      const parsed = await parseNcsdHeader(ncsdChunk);
-      if (parsed.ok) {
-        const hashes: Record<Exclude<PartitionId, 'ncsd_hdr'>, string> = {
-          firm0_boot1: parsed.records['firm0_boot1']?.sha256 || '',
-          firm1_stage2: parsed.records['firm1_stage2']?.sha256 || '',
-          twl_sysdata: parsed.records['twl_sysdata']?.sha256 || '',
-          ctrnand_sys: parsed.records['ctrnand_sys']?.sha256 || '',
-          nand_userdata: parsed.records['nand_userdata']?.sha256 || '',
-        };
-
-        if (modifiedPartitionId && modifiedPartitionId !== 'ncsd_hdr') {
-          if (modifiedCiphertext) {
-            hashes[modifiedPartitionId] = await computeSHA256Hex(modifiedCiphertext);
-          } else {
-            const partBuf = await this.readPartition(modifiedPartitionId);
-            hashes[modifiedPartitionId] = await computeSHA256Hex(partBuf);
-          }
-        }
-
-        if (Object.values(hashes).every((h) => h.length === 64)) {
-          const ncsd = await buildNcsdHeaderFromHashes(hashes);
-          await this.writePartitionRaw('ncsd_hdr', ncsd);
-          return;
-        }
-      }
+      const dec = await this.readDecryptedPartition('ctrnand');
+      const parsed = parseCtrNandVolumePartition(dec);
+      if (parsed.ok) return parsed.data;
     } catch {
-      // Fallback to full read if any error occurs
+      // Fallback to defaults if unreadable
     }
+    return getDefaultCtrNandVolume();
+  }
 
-    const [firm0, firm1, sysdata, ctrnand, userdata] = await Promise.all([
-      this.readPartition('firm0_boot1'),
-      this.readPartition('firm1_stage2'),
-      this.readPartition('twl_sysdata'),
-      this.readPartition('ctrnand_sys'),
-      this.readPartition('nand_userdata'),
-    ]);
-    const ncsd = await buildNcsdHeader({
-      firm0_boot1: firm0,
-      firm1_stage2: firm1,
-      twl_sysdata: sysdata,
-      ctrnand_sys: ctrnand,
-      nand_userdata: userdata,
-    });
-    await this.writePartitionRaw('ncsd_hdr', ncsd);
+  private async writeCtrNandVolume(volume: CtrNandVolumeData): Promise<void> {
+    const plaintext = buildCtrNandVolumePartition(volume);
+    const ciphertext = await encryptPartition('ctrnand', plaintext);
+    await this.writePartitionRaw('ctrnand', ciphertext);
   }
 
   /**
-   * Encrypts and saves SystemConfig to TWL_SYSDATA (Keyslot 0x16) in IndexedDB.
+   * Saves SystemConfig inside CTRNAND /rw/sys/ (Keyslot 0x04 + CID CTR).
    */
   saveSystemConfig(config: SystemConfig): Promise<void> {
     return this.enqueueWrite(async () => {
-      const plaintext = buildSysDataPartition(config);
-      const ciphertext = await encryptPartition('twl_sysdata', plaintext);
-      await this.writePartitionRaw('twl_sysdata', ciphertext);
-      await this.syncNcsdDigests('twl_sysdata', ciphertext);
+      const vol = await this.readCurrentCtrNandVolume();
+      await this.writeCtrNandVolume({ ...vol, config });
     });
   }
 
   /**
-   * Encrypts and saves UserSaveData to NAND_USERDATA (Keyslot 0x3D) in IndexedDB.
+   * Saves UserSaveData inside CTRNAND /data/<ID0>/ (Keyslot 0x04 + CID CTR).
    */
   saveUserData(userData: UserSaveData): Promise<void> {
     return this.enqueueWrite(async () => {
-      const plaintext = buildUserDataPartition(userData);
-      const ciphertext = await encryptPartition('nand_userdata', plaintext);
-      await this.writePartitionRaw('nand_userdata', ciphertext);
-      await this.syncNcsdDigests('nand_userdata', ciphertext);
+      const vol = await this.readCurrentCtrNandVolume();
+      await this.writeCtrNandVolume({ ...vol, userData });
     });
   }
 
   /**
-   * Encrypts and saves CTRNAND title.db, import.db, ticket.db, and packages to CTRNAND_SYS (Keyslot 0x25).
+   * Saves CTRNAND /title/ & /dbs/ (title.db, import.db, ticket.db, certs.db) (Keyslot 0x04 + CID CTR).
    */
   saveCtrNandArchive(archive: CtrNandArchiveData): Promise<void> {
     return this.enqueueWrite(async () => {
-      const plaintext = buildCtrNandPartition(archive);
-      const ciphertext = await encryptPartition('ctrnand_sys', plaintext);
-      await this.writePartitionRaw('ctrnand_sys', ciphertext);
-      await this.syncNcsdDigests('ctrnand_sys', ciphertext);
+      const vol = await this.readCurrentCtrNandVolume();
+      await this.writeCtrNandVolume({ ...vol, archive });
     });
   }
 
   /**
-   * Formats and provisions all 256 chunks into IndexedDB with real AES-128-CTR encrypted partitions and RSA-2048 signed NCSD header.
+   * Provisions a fresh 4.00 MB (256 × 16 KB) NAND in IndexedDB with a unique 16-byte eMMC NAND CID,
+   * CID-derived AES-128-CTR encryption per partition, and Sector 0 NCSD + encrypted TWL MBR.
    */
   provisionFreshNand(): Promise<void> {
     return this.enqueueWrite(async () => {
       resetDefaultKeyslots();
-      const rawFirm0 = buildFirm0Partition(getDefaultStage1Opcodes());
-      const rawFirm1 = buildFirm1Partition(getDefaultStage2Header());
-      const rawSysdata = buildSysDataPartition(getDefaultSystemConfig());
-      const rawCtrnand = buildCtrNandPartition(getDefaultCtrNandArchive());
-      const rawUserdata = buildUserDataPartition(getDefaultUserSaveData());
+      generateFreshNandCid();
 
-      const [encFirm0, encFirm1, encSysdata, encCtrnand, encUserdata] = await Promise.all([
-        encryptPartition('firm0_boot1', rawFirm0),
-        encryptPartition('firm1_stage2', rawFirm1),
-        encryptPartition('twl_sysdata', rawSysdata),
-        encryptPartition('ctrnand_sys', rawCtrnand),
-        encryptPartition('nand_userdata', rawUserdata),
-      ]);
-
-      const ncsd = await buildNcsdHeader({
-        firm0_boot1: encFirm0,
-        firm1_stage2: encFirm1,
-        twl_sysdata: encSysdata,
-        ctrnand_sys: encCtrnand,
-        nand_userdata: encUserdata,
+      const rawTwl = buildTwlPartition(getDefaultTwlPartitionData());
+      const rawAgb = buildAgbSavePartition(getDefaultAgbSaveData());
+      const rawFirm0 = buildFirmPartition('FIRM0', getDefaultFirmPayload('FIRM0'));
+      const rawFirm1 = buildFirmPartition('FIRM1', getDefaultFirmPayload('FIRM1'));
+      const rawCtr = buildCtrNandVolumePartition({
+        config: getDefaultSystemConfig(),
+        archive: getDefaultCtrNandArchive(),
+        userData: getDefaultUserSaveData(),
       });
+
+      const [ncsd, encTwl, encAgb, encFirm0, encFirm1, encCtr] = await Promise.all([
+        buildNcsdHeader(),
+        encryptPartition('twl_nand', rawTwl),
+        encryptPartition('agbsave', rawAgb),
+        encryptPartition('firm0', rawFirm0),
+        encryptPartition('firm1', rawFirm1),
+        encryptPartition('ctrnand', rawCtr),
+      ]);
 
       const partitionMap: Record<PartitionId, Uint8Array> = {
         ncsd_hdr: ncsd,
-        firm0_boot1: encFirm0,
-        firm1_stage2: encFirm1,
-        twl_sysdata: encSysdata,
-        ctrnand_sys: encCtrnand,
-        nand_userdata: encUserdata,
+        twl_nand: encTwl,
+        agbsave: encAgb,
+        firm0: encFirm0,
+        firm1: encFirm1,
+        ctrnand: encCtr,
       };
 
       const db = await this.openDB();
-
       await new Promise<void>((resolve, reject) => {
         const tx = db.transaction([STORE_CHUNKS, STORE_META], 'readwrite');
         const store = tx.objectStore(STORE_CHUNKS);
@@ -364,12 +328,17 @@ class NandIDBDriver {
         metaStore.put({
           key: 'provisioned',
           value: true,
-          cryptoVersion: 2,
-          cipher: 'AES-128-CTR',
-          signature: 'RSASSA-PKCS1-v1_5',
+          cryptoVersion: CURRENT_CRYPTO_VERSION,
+          cipher: 'AES-128-CTR-CID',
+          signature: 'RSA-2048-NCSD',
           formattedAt: Date.now(),
         });
+        metaStore.put({
+          key: 'nand_cid',
+          value: getNandCidHex(),
+        });
         metaStore.delete('custom_keyslots');
+
         tx.oncomplete = () => {
           for (let i = 0; i < TOTAL_CHUNKS; i++) {
             this.emitIO(i, 'write');
@@ -384,30 +353,30 @@ class NandIDBDriver {
   repairPartition(id: PartitionId): Promise<void> {
     return this.enqueueWrite(async () => {
       if (id === 'ncsd_hdr') {
-        await this.syncNcsdDigests();
+        const ncsd = await buildNcsdHeader();
+        await this.writePartitionRaw('ncsd_hdr', ncsd);
         return;
       }
       let rawPlaintext: Uint8Array;
       switch (id) {
-        case 'firm0_boot1':
-          rawPlaintext = buildFirm0Partition(getDefaultStage1Opcodes());
+        case 'twl_nand':
+          rawPlaintext = buildTwlPartition(getDefaultTwlPartitionData());
           break;
-        case 'firm1_stage2':
-          rawPlaintext = buildFirm1Partition(getDefaultStage2Header());
+        case 'agbsave':
+          rawPlaintext = buildAgbSavePartition(getDefaultAgbSaveData());
           break;
-        case 'twl_sysdata':
-          rawPlaintext = buildSysDataPartition(getDefaultSystemConfig());
+        case 'firm0':
+          rawPlaintext = buildFirmPartition('FIRM0', getDefaultFirmPayload('FIRM0'));
           break;
-        case 'ctrnand_sys':
-          rawPlaintext = buildCtrNandPartition(getDefaultCtrNandArchive());
+        case 'firm1':
+          rawPlaintext = buildFirmPartition('FIRM1', getDefaultFirmPayload('FIRM1'));
           break;
-        case 'nand_userdata':
-          rawPlaintext = buildUserDataPartition(getDefaultUserSaveData());
+        case 'ctrnand':
+          rawPlaintext = buildCtrNandVolumePartition(getDefaultCtrNandVolume());
           break;
       }
       const ciphertext = await encryptPartition(id, rawPlaintext);
       await this.writePartitionRaw(id, ciphertext);
-      await this.syncNcsdDigests(id, ciphertext);
     });
   }
 
@@ -419,35 +388,41 @@ class NandIDBDriver {
 
   async loadPersistedKeyslots(): Promise<void> {
     const db = await this.openDB();
-    const stored = await new Promise<
-      Record<string, { keyHex: string; counterHex: string }> | null
-    >((resolve, reject) => {
+    const { cidHex, storedKeys } = await new Promise<{
+      cidHex: string | null;
+      storedKeys: Record<string, string> | null;
+    }>((resolve, reject) => {
       const tx = db.transaction(STORE_META, 'readonly');
-      const req = tx.objectStore(STORE_META).get('custom_keyslots');
-      req.onsuccess = () => resolve(req.result?.value ?? null);
-      req.onerror = () => reject(req.error);
+      const cidReq = tx.objectStore(STORE_META).get('nand_cid');
+      const keysReq = tx.objectStore(STORE_META).get('custom_keyslots');
+      let cHex: string | null = null;
+      let sKeys: Record<string, string> | null = null;
+      cidReq.onsuccess = () => {
+        cHex = cidReq.result?.value ?? null;
+      };
+      keysReq.onsuccess = () => {
+        sKeys = keysReq.result?.value ?? null;
+      };
+      tx.oncomplete = () => resolve({ cidHex: cHex, storedKeys: sKeys });
+      tx.onerror = () => reject(tx.error);
     });
 
-    if (!stored) return;
-    const map: PartitionKeyOverrideMap = {};
-    const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
-      'firm0_boot1',
-      'firm1_stage2',
-      'twl_sysdata',
-      'ctrnand_sys',
-      'nand_userdata',
-    ];
-    for (const id of ids) {
-      const entry = stored[id];
-      if (entry?.keyHex && entry?.counterHex) {
-        map[id] = {
-          keyBytes: hexToBytes(entry.keyHex),
-          initialCounter: hexToBytes(entry.counterHex),
-        };
-      }
+    if (cidHex && cidHex.length === 32) {
+      setNandCid(hexToBytes(cidHex));
     }
-    if (Object.keys(map).length > 0) {
-      applyKeyslotOverrides(map);
+
+    if (storedKeys) {
+      const map: PartitionKeyOverrideMap = {};
+      const ids: DataPartitionId[] = ['twl_nand', 'agbsave', 'firm0', 'firm1', 'ctrnand'];
+      for (const id of ids) {
+        const keyHex = storedKeys[id];
+        if (keyHex && keyHex.length === 32) {
+          map[id] = hexToBytes(keyHex);
+        }
+      }
+      if (Object.keys(map).length > 0) {
+        applyKeyslotOverrides(map);
+      }
     }
   }
 
@@ -465,8 +440,8 @@ class NandIDBDriver {
   }
 
   /**
-   * Reads the entire 4.00 MB (256 × 16 KB) NAND image from IndexedDB.
-   * When mode === 'decrypted', AES-128-CTR decrypts all encrypted partitions into plaintext.
+   * Reads the 4.00 MB (256 × 16 KB) NAND image from IndexedDB.
+   * When mode === 'decrypted', decrypts all partitions AND decrypts the TWL MBR (0x1BE..0x1FF).
    */
   async dumpNandImage(mode: 'encrypted' | 'decrypted'): Promise<Uint8Array> {
     const db = await this.openDB();
@@ -492,8 +467,10 @@ class NandIDBDriver {
     }
 
     const decNand = new Uint8Array(totalBytes);
-    // Chunk 0 (NCSD_HDR) is stored plaintext
     decNand.set(rawNand.subarray(0, CHUNK_SIZE), 0);
+    // Decrypt Sector 0 TWL MBR (0x1BE..0x1FF) so TWLN/TWLP entries & 0x55AA signature are readable in plaintext dumps
+    const decMbr = await cryptTwlMbrBytes(rawNand.subarray(0x1be, 0x200));
+    decNand.set(decMbr, 0x1be);
 
     for (const spec of NAND_PARTITIONS) {
       if (spec.id === 'ncsd_hdr') continue;
@@ -507,11 +484,12 @@ class NandIDBDriver {
 
   /**
    * Restores a 4.00 MB (256 × 16 KB) NAND .bin backup (auto-detecting Encrypted vs Decrypted .bin).
-   * Optionally imports custom AES-128-CTR keyslots alongside an encrypted or decrypted NAND backup.
+   * Applies optional keyslot overrides + NAND CID when restoring an encrypted dump.
    */
   restoreNandImage(
     imageBytes: Uint8Array,
-    keyOverrides?: PartitionKeyOverrideMap
+    keyOverrides?: PartitionKeyOverrideMap,
+    cidOverride?: Uint8Array
   ): Promise<{
     mode: 'encrypted' | 'decrypted';
     usedCustomKeys: boolean;
@@ -526,17 +504,28 @@ class NandIDBDriver {
       }
 
       if (keyOverrides && Object.keys(keyOverrides).length > 0) {
-        applyKeyslotOverrides(keyOverrides);
+        applyKeyslotOverrides(keyOverrides, cidOverride);
+      } else if (cidOverride && cidOverride.byteLength === 16) {
+        setNandCid(cidOverride);
       }
 
-      // Detect whether imageBytes contains plaintext (decrypted) or ciphertext (encrypted) partitions
       let plaintextMagicHits = 0;
       for (const spec of NAND_PARTITIONS) {
         if (spec.id === 'ncsd_hdr') continue;
         const off = spec.startChunk * CHUNK_SIZE;
-        const magic = readAsciiFixed(imageBytes, off, 4);
-        if (magic === spec.magic) {
-          plaintextMagicHits++;
+        if (spec.id === 'ctrnand') {
+          if (
+            imageBytes[off + 0x1fe] === 0x55 &&
+            imageBytes[off + 0x1ff] === 0xaa &&
+            readAsciiFixed(imageBytes, off + 0x236, 8) === 'FAT16   '
+          ) {
+            plaintextMagicHits++;
+          }
+        } else {
+          const magic = readAsciiFixed(imageBytes, off, 4);
+          if (magic === spec.magic) {
+            plaintextMagicHits++;
+          }
         }
       }
 
@@ -544,23 +533,23 @@ class NandIDBDriver {
       const finalNand = new Uint8Array(expectedSize);
 
       if (mode === 'decrypted') {
-        const encPartitions = {} as Record<Exclude<PartitionId, 'ncsd_hdr'>, Uint8Array>;
+        if (getNandCidBytes().byteLength !== 16) {
+          generateFreshNandCid();
+        }
         for (const spec of NAND_PARTITIONS) {
           if (spec.id === 'ncsd_hdr') continue;
           const startByte = spec.startChunk * CHUNK_SIZE;
           const endByte = (spec.endChunk + 1) * CHUNK_SIZE;
-          const plainSlice = imageBytes.subarray(startByte, endByte);
-          const encSlice = await encryptPartition(spec.id, plainSlice);
-          encPartitions[spec.id] = encSlice;
+          const encSlice = await encryptPartition(spec.id, imageBytes.subarray(startByte, endByte));
           finalNand.set(encSlice, startByte);
         }
-        const rebuiltNcsd = await buildNcsdHeader(encPartitions);
+        const rebuiltNcsd = await buildNcsdHeader();
         finalNand.set(rebuiltNcsd, 0);
       } else {
         finalNand.set(imageBytes, 0);
       }
 
-      // Count how many partitions validate cleanly under active keyslots
+      // Count valid partitions under active CID + keyslots
       let validPartitions = 0;
       const ncsdParsed = await parseNcsdHeader(finalNand.subarray(0, CHUNK_SIZE));
       if (ncsdParsed.ok) validPartitions++;
@@ -569,23 +558,14 @@ class NandIDBDriver {
         if (spec.id === 'ncsd_hdr') continue;
         const startByte = spec.startChunk * CHUNK_SIZE;
         const endByte = (spec.endChunk + 1) * CHUNK_SIZE;
-        const cipherSlice = finalNand.subarray(startByte, endByte);
         try {
-          const dec = await decryptPartition(spec.id, cipherSlice);
+          const dec = await decryptPartition(spec.id, finalNand.subarray(startByte, endByte));
           let ok = false;
-          if (spec.id === 'firm0_boot1') ok = parseFirm0Partition(dec).ok;
-          else if (spec.id === 'firm1_stage2') ok = parseFirm1Partition(dec).ok;
-          else if (spec.id === 'twl_sysdata') ok = parseSysDataPartition(dec).ok;
-          else if (spec.id === 'ctrnand_sys') ok = parseCtrNandPartition(dec).ok;
-          else if (spec.id === 'nand_userdata') ok = parseUserDataPartition(dec).ok;
-          if (ok) {
-            if (!ncsdParsed.ok) {
-              validPartitions++;
-            } else {
-              const sha = await computeSHA256Hex(cipherSlice);
-              if (sha === ncsdParsed.records[spec.id]?.sha256) validPartitions++;
-            }
-          }
+          if (spec.id === 'twl_nand') ok = parseTwlPartition(dec).ok;
+          else if (spec.id === 'agbsave') ok = parseAgbSavePartition(dec).ok;
+          else if (spec.id === 'firm0' || spec.id === 'firm1') ok = parseFirmPartition(dec).ok;
+          else if (spec.id === 'ctrnand') ok = parseCtrNandVolumePartition(dec).ok;
+          if (ok) validPartitions++;
         } catch {
           // Leave invalid
         }
@@ -609,26 +589,21 @@ class NandIDBDriver {
         metaStore.put({
           key: 'provisioned',
           value: true,
-          cryptoVersion: 2,
-          cipher: 'AES-128-CTR',
-          signature: 'RSASSA-PKCS1-v1_5',
+          cryptoVersion: CURRENT_CRYPTO_VERSION,
+          cipher: 'AES-128-CTR-CID',
+          signature: 'RSA-2048-NCSD',
           formattedAt: Date.now(),
+        });
+        metaStore.put({
+          key: 'nand_cid',
+          value: getNandCidHex(),
         });
 
         if (keyOverrides && Object.keys(keyOverrides).length > 0) {
-          const serialized: Record<string, { keyHex: string; counterHex: string }> = {};
-          const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
-            'firm0_boot1',
-            'firm1_stage2',
-            'twl_sysdata',
-            'ctrnand_sys',
-            'nand_userdata',
-          ];
+          const serialized: Record<string, string> = {};
+          const ids: DataPartitionId[] = ['twl_nand', 'agbsave', 'firm0', 'firm1', 'ctrnand'];
           for (const id of ids) {
-            serialized[id] = {
-              keyHex: bytesToHex(CTR_KEYSLOTS[id].keyBytes),
-              counterHex: bytesToHex(CTR_KEYSLOTS[id].initialCounter),
-            };
+            serialized[id] = bytesToHex(CTR_KEYSLOTS[id].keyBytes);
           }
           metaStore.put({
             key: 'custom_keyslots',
@@ -645,7 +620,7 @@ class NandIDBDriver {
 
       return {
         mode,
-        usedCustomKeys: Boolean(keyOverrides && Object.keys(keyOverrides).length > 0),
+        usedCustomKeys: Boolean((keyOverrides && Object.keys(keyOverrides).length > 0) || cidOverride),
         validPartitions,
       };
     });

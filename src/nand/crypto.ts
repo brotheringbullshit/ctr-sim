@@ -1,4 +1,4 @@
-import { PartitionId } from './types';
+import { CHUNK_SIZE, DataPartitionId, NAND_PARTITIONS, PartitionId } from './types';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -40,114 +40,6 @@ export function readUint32LE(buf: Uint8Array, offset: number): number {
   return view.getUint32(offset, true);
 }
 
-// Standard IEEE 802.3 CRC32 table
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let k = 0; k < 8; k++) {
-      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    table[i] = c >>> 0;
-  }
-  return table;
-})();
-
-export function computeCRC32(data: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < data.length; i++) {
-    crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-export async function computeSHA256Hex(data: Uint8Array): Promise<string> {
-  const copy = new Uint8Array(data.byteLength);
-  copy.set(data);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', copy.buffer);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/* ==================== 3DS AES-128-CTR HARDWARE KEYSLOTS ==================== */
-
-export interface KeyslotInfo {
-  slot: number;
-  slotHex: string;
-  name: string;
-  keyBytes: Uint8Array;
-  initialCounter: Uint8Array;
-}
-
-// Standard 3DS 128-bit keyslots & partition counter seeds
-export const CTR_KEYSLOTS: Record<Exclude<PartitionId, 'ncsd_hdr'>, KeyslotInfo> = {
-  firm0_boot1: {
-    slot: 0x11,
-    slotHex: '0x11',
-    name: 'FIRM0/FIRM1 Boot9 Keyslot',
-    keyBytes: new Uint8Array([
-      0xd0, 0x7b, 0x33, 0x7f, 0x9d, 0x43, 0xec, 0x49,
-      0x59, 0xfc, 0x92, 0xdc, 0x14, 0x86, 0x91, 0x16,
-    ]),
-    initialCounter: new Uint8Array([
-      0x46, 0x49, 0x52, 0x4d, 0x30, 0x5f, 0x43, 0x54,
-      0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-    ]),
-  },
-  firm1_stage2: {
-    slot: 0x11,
-    slotHex: '0x11',
-    name: 'FIRM0/FIRM1 Boot9 Keyslot',
-    keyBytes: new Uint8Array([
-      0xd0, 0x7b, 0x33, 0x7f, 0x9d, 0x43, 0xec, 0x49,
-      0x59, 0xfc, 0x92, 0xdc, 0x14, 0x86, 0x91, 0x16,
-    ]),
-    initialCounter: new Uint8Array([
-      0x46, 0x49, 0x52, 0x4d, 0x31, 0x5f, 0x43, 0x54,
-      0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
-    ]),
-  },
-  twl_sysdata: {
-    slot: 0x16,
-    slotHex: '0x16',
-    name: 'TWL System SaveData Keyslot',
-    keyBytes: new Uint8Array([
-      0x5a, 0x8a, 0x24, 0x6e, 0x13, 0x9b, 0x77, 0x50,
-      0x38, 0xef, 0x48, 0x62, 0x8d, 0xa1, 0x99, 0xb4,
-    ]),
-    initialCounter: new Uint8Array([
-      0x54, 0x57, 0x4c, 0x53, 0x59, 0x53, 0x5f, 0x43,
-      0x54, 0x52, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30,
-    ]),
-  },
-  ctrnand_sys: {
-    slot: 0x25,
-    slotHex: '0x25',
-    name: 'CTRNAND 7.x System Titles Keyslot',
-    keyBytes: new Uint8Array([
-      0xce, 0xe2, 0x8e, 0x00, 0x77, 0x6c, 0x4e, 0xa0,
-      0x07, 0x7d, 0x9e, 0xc1, 0x41, 0x7d, 0x74, 0xe0,
-    ]),
-    initialCounter: new Uint8Array([
-      0x43, 0x54, 0x52, 0x4e, 0x41, 0x4e, 0x44, 0x5f,
-      0x53, 0x59, 0x53, 0x00, 0x00, 0x00, 0x00, 0x50,
-    ]),
-  },
-  nand_userdata: {
-    slot: 0x3d,
-    slotHex: '0x3D',
-    name: 'NAND User SaveData Keyslot',
-    keyBytes: new Uint8Array([
-      0x7a, 0x35, 0x88, 0xc0, 0x22, 0xb1, 0x49, 0xd4,
-      0x96, 0x10, 0x5f, 0xa3, 0xd9, 0x1c, 0x63, 0x88,
-    ]),
-    initialCounter: new Uint8Array([
-      0x55, 0x53, 0x45, 0x52, 0x44, 0x41, 0x54, 0x41,
-      0x5f, 0x43, 0x54, 0x52, 0x00, 0x00, 0x00, 0xa0,
-    ]),
-  },
-};
-
 export function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
@@ -166,222 +58,333 @@ export function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-export interface KeyslotSecret {
-  keyBytes: Uint8Array;
-  initialCounter: Uint8Array;
+// Standard IEEE 802.3 CRC32 (used ONLY internally inside custom sim partition records, never in NCSD_HDR)
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+export function computeCRC32(data: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < data.length; i++) {
+    crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
-export type PartitionKeyOverrideMap = Partial<
-  Record<Exclude<PartitionId, 'ncsd_hdr'>, KeyslotSecret>
->;
+export async function computeSHA256Bytes(data: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', copy.buffer);
+  return new Uint8Array(hashBuffer);
+}
+
+export async function computeSHA256Hex(data: Uint8Array): Promise<string> {
+  return bytesToHex(await computeSHA256Bytes(data));
+}
+
+/* ==================== CONSOLE-UNIQUE NAND CID & AES-128-CTR NONCE DERIVATION ==================== */
+
+// Fallback CID until provisioned / hydrated from IndexedDB
+const DEFAULT_FALLBACK_CID = new Uint8Array([
+  0x15, 0x01, 0x00, 0x34, 0x46, 0x34, 0x41, 0x45,
+  0x42, 0x03, 0x9a, 0x71, 0xc4, 0x20, 0x0f, 0x8d,
+]);
+
+let activeNandCid = new Uint8Array(DEFAULT_FALLBACK_CID);
+
+export function getNandCidBytes(): Uint8Array {
+  return new Uint8Array(activeNandCid);
+}
+
+export function getNandCidHex(): string {
+  return bytesToHex(activeNandCid);
+}
+
+export function setNandCid(cidBytes: Uint8Array): void {
+  if (cidBytes.byteLength !== 16) {
+    throw new Error('NAND CID must be exactly 16 bytes (128-bit)');
+  }
+  activeNandCid = new Uint8Array(cidBytes);
+}
+
+export function generateFreshNandCid(): Uint8Array {
+  const cid = new Uint8Array(16);
+  crypto.getRandomValues(cid);
+  // Keep Samsung/Toshiba eMMC manufacturer prefix style
+  cid[0] = 0x15;
+  cid[1] = 0x01;
+  activeNandCid = cid;
+  return new Uint8Array(cid);
+}
+
+/**
+ * Adds a 16-byte AES block delta (byteOffset >>> 4) to a big-endian 128-bit CTR counter.
+ */
+function addBlocksToCtr128BE(ctr16: Uint8Array, blockDelta: number): Uint8Array {
+  const out = new Uint8Array(ctr16);
+  let carry = blockDelta >>> 0;
+  for (let i = 15; i >= 0 && carry > 0; i--) {
+    const sum = out[i] + (carry & 0xff);
+    out[i] = sum & 0xff;
+    carry = (carry >>> 8) + (sum >>> 8);
+  }
+  return out;
+}
+
+/**
+ * Real 3DS NAND CTR nonce derivation:
+ * Normal 3DS CTR nonce = SHA-256(NAND_CID)[0..15] + (byteOffset >>> 4)
+ * TWL MBR / TWL partition CTR nonce = byte-reversed SHA-256(NAND_CID)[0..15] + (byteOffset >>> 4)
+ */
+async function derivePartitionCounter(byteOffset: number, twlMode: boolean): Promise<Uint8Array> {
+  const cidDigest = await computeSHA256Bytes(activeNandCid);
+  const base16 = cidDigest.subarray(0, 16);
+  const counterBase = new Uint8Array(16);
+  if (twlMode) {
+    for (let i = 0; i < 16; i++) {
+      counterBase[i] = base16[15 - i];
+    }
+  } else {
+    counterBase.set(base16);
+  }
+  return addBlocksToCtr128BE(counterBase, byteOffset >>> 4);
+}
+
+/* ==================== 3DS HARDWARE AES-128 KEYSLOTS (KEY ONLY — NONCE COMES FROM CID) ==================== */
+
+export interface KeyslotInfo {
+  slot: number;
+  slotHex: string;
+  name: string;
+  keyBytes: Uint8Array;
+}
+
+export const CTR_KEYSLOTS: Record<DataPartitionId, KeyslotInfo> = {
+  twl_nand: {
+    slot: 0x03,
+    slotHex: '0x03',
+    name: 'TWL eMMC / MBR Keyslot',
+    keyBytes: new Uint8Array([
+      0x5a, 0x8a, 0x24, 0x6e, 0x13, 0x9b, 0x77, 0x50,
+      0x38, 0xef, 0x48, 0x62, 0x8d, 0xa1, 0x99, 0xb4,
+    ]),
+  },
+  agbsave: {
+    slot: 0x07,
+    slotHex: '0x07',
+    name: 'AGBSAVE VC Keyslot',
+    keyBytes: new Uint8Array([
+      0x7a, 0x35, 0x88, 0xc0, 0x22, 0xb1, 0x49, 0xd4,
+      0x96, 0x10, 0x5f, 0xa3, 0xd9, 0x1c, 0x63, 0x88,
+    ]),
+  },
+  firm0: {
+    slot: 0x06,
+    slotHex: '0x06',
+    name: 'NATIVE_FIRM Keyslot',
+    keyBytes: new Uint8Array([
+      0xd0, 0x7b, 0x33, 0x7f, 0x9d, 0x43, 0xec, 0x49,
+      0x59, 0xfc, 0x92, 0xdc, 0x14, 0x86, 0x91, 0x16,
+    ]),
+  },
+  firm1: {
+    slot: 0x06,
+    slotHex: '0x06',
+    name: 'NATIVE_FIRM Keyslot',
+    keyBytes: new Uint8Array([
+      0xd0, 0x7b, 0x33, 0x7f, 0x9d, 0x43, 0xec, 0x49,
+      0x59, 0xfc, 0x92, 0xdc, 0x14, 0x86, 0x91, 0x16,
+    ]),
+  },
+  ctrnand: {
+    slot: 0x04,
+    slotHex: '0x04',
+    name: 'Old3DS CTRNAND FAT16 Keyslot',
+    keyBytes: new Uint8Array([
+      0xce, 0xe2, 0x8e, 0x00, 0x77, 0x6c, 0x4e, 0xa0,
+      0x07, 0x7d, 0x9e, 0xc1, 0x41, 0x7d, 0x74, 0xe0,
+    ]),
+  },
+};
+
+export type PartitionKeyOverrideMap = Partial<Record<DataPartitionId, Uint8Array>>;
+
+const DEFAULT_CTR_KEYS: Record<DataPartitionId, Uint8Array> = {
+  twl_nand: new Uint8Array(CTR_KEYSLOTS.twl_nand.keyBytes),
+  agbsave: new Uint8Array(CTR_KEYSLOTS.agbsave.keyBytes),
+  firm0: new Uint8Array(CTR_KEYSLOTS.firm0.keyBytes),
+  firm1: new Uint8Array(CTR_KEYSLOTS.firm1.keyBytes),
+  ctrnand: new Uint8Array(CTR_KEYSLOTS.ctrnand.keyBytes),
+};
+
+const DATA_PARTITION_IDS: DataPartitionId[] = ['twl_nand', 'agbsave', 'firm0', 'firm1', 'ctrnand'];
 
 export interface CtrKeyBundle {
-  format: 'CTR-SIM-KEYBUNDLE-V1';
+  format: 'CTR-SIM-KEYBUNDLE-V2';
   exportedAt: string;
+  nandCidHex: string;
+  nonceDerivation: 'SHA-256(NAND_CID)[0..15] + (byteOffset >>> 4)';
   aesKeyslots: Record<
-    Exclude<PartitionId, 'ncsd_hdr'>,
+    DataPartitionId,
     {
       slot: number;
       slotHex: string;
       name: string;
       keyHex: string;
-      initialCounterHex: string;
+      mode: 'TWL-CID-CTR' | '3DS-CID-CTR';
     }
   >;
-  rootCaRsaPublicJwk: JsonWebKey;
+  simBoot9NandPublicJwk: JsonWebKey;
+  rsaKeyNote: string;
 }
-
-const DEFAULT_CTR_KEYSLOT_SECRETS: Record<Exclude<PartitionId, 'ncsd_hdr'>, KeyslotSecret> = {
-  firm0_boot1: {
-    keyBytes: new Uint8Array(CTR_KEYSLOTS.firm0_boot1.keyBytes),
-    initialCounter: new Uint8Array(CTR_KEYSLOTS.firm0_boot1.initialCounter),
-  },
-  firm1_stage2: {
-    keyBytes: new Uint8Array(CTR_KEYSLOTS.firm1_stage2.keyBytes),
-    initialCounter: new Uint8Array(CTR_KEYSLOTS.firm1_stage2.initialCounter),
-  },
-  twl_sysdata: {
-    keyBytes: new Uint8Array(CTR_KEYSLOTS.twl_sysdata.keyBytes),
-    initialCounter: new Uint8Array(CTR_KEYSLOTS.twl_sysdata.initialCounter),
-  },
-  ctrnand_sys: {
-    keyBytes: new Uint8Array(CTR_KEYSLOTS.ctrnand_sys.keyBytes),
-    initialCounter: new Uint8Array(CTR_KEYSLOTS.ctrnand_sys.initialCounter),
-  },
-  nand_userdata: {
-    keyBytes: new Uint8Array(CTR_KEYSLOTS.nand_userdata.keyBytes),
-    initialCounter: new Uint8Array(CTR_KEYSLOTS.nand_userdata.initialCounter),
-  },
-};
 
 export function areKeyslotsDefault(): boolean {
-  const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
-    'firm0_boot1',
-    'firm1_stage2',
-    'twl_sysdata',
-    'ctrnand_sys',
-    'nand_userdata',
-  ];
-  return ids.every((id) => {
-    const cur = CTR_KEYSLOTS[id];
-    const def = DEFAULT_CTR_KEYSLOT_SECRETS[id];
-    return (
-      bytesToHex(cur.keyBytes) === bytesToHex(def.keyBytes) &&
-      bytesToHex(cur.initialCounter) === bytesToHex(def.initialCounter)
-    );
-  });
+  return DATA_PARTITION_IDS.every(
+    (id) => bytesToHex(CTR_KEYSLOTS[id].keyBytes) === bytesToHex(DEFAULT_CTR_KEYS[id])
+  );
 }
 
-export function applyKeyslotOverrides(overrides: PartitionKeyOverrideMap): void {
-  const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
-    'firm0_boot1',
-    'firm1_stage2',
-    'twl_sysdata',
-    'ctrnand_sys',
-    'nand_userdata',
-  ];
-  for (const id of ids) {
-    const next = overrides[id];
-    if (next && next.keyBytes.byteLength === 16 && next.initialCounter.byteLength === 16) {
-      CTR_KEYSLOTS[id].keyBytes = new Uint8Array(next.keyBytes);
-      CTR_KEYSLOTS[id].initialCounter = new Uint8Array(next.initialCounter);
+export function applyKeyslotOverrides(overrides: PartitionKeyOverrideMap, cidBytes?: Uint8Array): void {
+  for (const id of DATA_PARTITION_IDS) {
+    const nextKey = overrides[id];
+    if (nextKey && nextKey.byteLength === 16) {
+      CTR_KEYSLOTS[id].keyBytes = new Uint8Array(nextKey);
     }
+  }
+  if (cidBytes && cidBytes.byteLength === 16) {
+    setNandCid(cidBytes);
   }
   aesKeyCache.clear();
 }
 
 export function resetDefaultKeyslots(): void {
-  applyKeyslotOverrides(DEFAULT_CTR_KEYSLOT_SECRETS);
+  applyKeyslotOverrides(DEFAULT_CTR_KEYS);
 }
 
 export function exportCtrKeyBundle(): CtrKeyBundle {
   return {
-    format: 'CTR-SIM-KEYBUNDLE-V1',
+    format: 'CTR-SIM-KEYBUNDLE-V2',
     exportedAt: new Date().toISOString(),
+    nandCidHex: getNandCidHex(),
+    nonceDerivation: 'SHA-256(NAND_CID)[0..15] + (byteOffset >>> 4)',
     aesKeyslots: {
-      firm0_boot1: {
-        slot: CTR_KEYSLOTS.firm0_boot1.slot,
-        slotHex: CTR_KEYSLOTS.firm0_boot1.slotHex,
-        name: CTR_KEYSLOTS.firm0_boot1.name,
-        keyHex: bytesToHex(CTR_KEYSLOTS.firm0_boot1.keyBytes),
-        initialCounterHex: bytesToHex(CTR_KEYSLOTS.firm0_boot1.initialCounter),
+      twl_nand: {
+        slot: CTR_KEYSLOTS.twl_nand.slot,
+        slotHex: CTR_KEYSLOTS.twl_nand.slotHex,
+        name: CTR_KEYSLOTS.twl_nand.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.twl_nand.keyBytes),
+        mode: 'TWL-CID-CTR',
       },
-      firm1_stage2: {
-        slot: CTR_KEYSLOTS.firm1_stage2.slot,
-        slotHex: CTR_KEYSLOTS.firm1_stage2.slotHex,
-        name: CTR_KEYSLOTS.firm1_stage2.name,
-        keyHex: bytesToHex(CTR_KEYSLOTS.firm1_stage2.keyBytes),
-        initialCounterHex: bytesToHex(CTR_KEYSLOTS.firm1_stage2.initialCounter),
+      agbsave: {
+        slot: CTR_KEYSLOTS.agbsave.slot,
+        slotHex: CTR_KEYSLOTS.agbsave.slotHex,
+        name: CTR_KEYSLOTS.agbsave.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.agbsave.keyBytes),
+        mode: '3DS-CID-CTR',
       },
-      twl_sysdata: {
-        slot: CTR_KEYSLOTS.twl_sysdata.slot,
-        slotHex: CTR_KEYSLOTS.twl_sysdata.slotHex,
-        name: CTR_KEYSLOTS.twl_sysdata.name,
-        keyHex: bytesToHex(CTR_KEYSLOTS.twl_sysdata.keyBytes),
-        initialCounterHex: bytesToHex(CTR_KEYSLOTS.twl_sysdata.initialCounter),
+      firm0: {
+        slot: CTR_KEYSLOTS.firm0.slot,
+        slotHex: CTR_KEYSLOTS.firm0.slotHex,
+        name: CTR_KEYSLOTS.firm0.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.firm0.keyBytes),
+        mode: '3DS-CID-CTR',
       },
-      ctrnand_sys: {
-        slot: CTR_KEYSLOTS.ctrnand_sys.slot,
-        slotHex: CTR_KEYSLOTS.ctrnand_sys.slotHex,
-        name: CTR_KEYSLOTS.ctrnand_sys.name,
-        keyHex: bytesToHex(CTR_KEYSLOTS.ctrnand_sys.keyBytes),
-        initialCounterHex: bytesToHex(CTR_KEYSLOTS.ctrnand_sys.initialCounter),
+      firm1: {
+        slot: CTR_KEYSLOTS.firm1.slot,
+        slotHex: CTR_KEYSLOTS.firm1.slotHex,
+        name: CTR_KEYSLOTS.firm1.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.firm1.keyBytes),
+        mode: '3DS-CID-CTR',
       },
-      nand_userdata: {
-        slot: CTR_KEYSLOTS.nand_userdata.slot,
-        slotHex: CTR_KEYSLOTS.nand_userdata.slotHex,
-        name: CTR_KEYSLOTS.nand_userdata.name,
-        keyHex: bytesToHex(CTR_KEYSLOTS.nand_userdata.keyBytes),
-        initialCounterHex: bytesToHex(CTR_KEYSLOTS.nand_userdata.initialCounter),
+      ctrnand: {
+        slot: CTR_KEYSLOTS.ctrnand.slot,
+        slotHex: CTR_KEYSLOTS.ctrnand.slotHex,
+        name: CTR_KEYSLOTS.ctrnand.name,
+        keyHex: bytesToHex(CTR_KEYSLOTS.ctrnand.keyBytes),
+        mode: '3DS-CID-CTR',
       },
     },
-    rootCaRsaPublicJwk: { ...NINTENDO_ROOT_PUB_JWK },
+    simBoot9NandPublicJwk: { ...SIM_BOOT9_NAND_PUB_JWK },
+    rsaKeyNote:
+      'Simulator Boot9 NAND-specific RSA-2048 keypair (distinct from Gamecard ITCM key; Nintendo production private key is unavailable).',
   };
 }
 
 /**
- * Exports a compact 248-byte binary keyslot database (aeskeydb.bin):
- * 8-byte header ("KEY0", version=1) + 5 × 48-byte records [partitionId(15), slot(1), key(16), ctr(16)]
+ * Exports a compact 184-byte binary keyslot + CID bundle (aeskeydb.bin):
+ * 8-byte header ("KEY1", count=5) + 16-byte NAND CID + 5 × 32-byte records [partitionId(15), slot(1), key(16)]
  */
 export function exportAesKeyDbBinary(): Uint8Array {
-  const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
-    'firm0_boot1',
-    'firm1_stage2',
-    'twl_sysdata',
-    'ctrnand_sys',
-    'nand_userdata',
-  ];
-  const out = new Uint8Array(8 + ids.length * 48);
-  writeAsciiFixed(out, 0, 'KEY0', 4);
-  writeUint32LE(out, 4, ids.length);
-  ids.forEach((id, idx) => {
-    const off = 8 + idx * 48;
+  const out = new Uint8Array(24 + DATA_PARTITION_IDS.length * 32);
+  writeAsciiFixed(out, 0, 'KEY1', 4);
+  writeUint32LE(out, 4, DATA_PARTITION_IDS.length);
+  out.set(activeNandCid.subarray(0, 16), 8);
+  DATA_PARTITION_IDS.forEach((id, idx) => {
+    const off = 24 + idx * 32;
     const slotInfo = CTR_KEYSLOTS[id];
     writeAsciiFixed(out, off, id, 15);
     out[off + 15] = slotInfo.slot & 0xff;
     out.set(slotInfo.keyBytes.subarray(0, 16), off + 16);
-    out.set(slotInfo.initialCounter.subarray(0, 16), off + 32);
   });
   return out;
 }
 
-export function parseKeyBundleFile(bytes: Uint8Array): PartitionKeyOverrideMap {
+export function parseKeyBundleFile(bytes: Uint8Array): {
+  nandCid?: Uint8Array;
+  keyOverrides: PartitionKeyOverrideMap;
+} {
   const headerMagic = readAsciiFixed(bytes, 0, 4);
-  if (headerMagic === 'KEY0' && bytes.byteLength >= 8 + 48) {
+  if (headerMagic === 'KEY1' && bytes.byteLength >= 24 + 32) {
     const count = Math.min(readUint32LE(bytes, 4), 16);
-    const out: PartitionKeyOverrideMap = {};
-    const validIds = new Set<Exclude<PartitionId, 'ncsd_hdr'>>([
-      'firm0_boot1',
-      'firm1_stage2',
-      'twl_sysdata',
-      'ctrnand_sys',
-      'nand_userdata',
-    ]);
+    const nandCid = bytes.slice(8, 24);
+    const validIds = new Set<DataPartitionId>(DATA_PARTITION_IDS);
+    const keyOverrides: PartitionKeyOverrideMap = {};
     for (let i = 0; i < count; i++) {
-      const off = 8 + i * 48;
-      if (off + 48 > bytes.byteLength) break;
-      const partId = readAsciiFixed(bytes, off, 15) as Exclude<PartitionId, 'ncsd_hdr'>;
+      const off = 24 + i * 32;
+      if (off + 32 > bytes.byteLength) break;
+      const partId = readAsciiFixed(bytes, off, 15) as DataPartitionId;
       if (validIds.has(partId)) {
-        out[partId] = {
-          keyBytes: bytes.slice(off + 16, off + 32),
-          initialCounter: bytes.slice(off + 32, off + 48),
-        };
+        keyOverrides[partId] = bytes.slice(off + 16, off + 32);
       }
     }
-    if (Object.keys(out).length === 0) {
-      throw new Error('No recognized partition keyslots inside binary keyfile');
+    if (Object.keys(keyOverrides).length === 0) {
+      throw new Error('No recognized partition keyslots inside KEY1 aeskeydb.bin');
     }
-    return out;
+    return { nandCid, keyOverrides };
   }
 
   const text = textDecoder.decode(bytes);
   const parsed = JSON.parse(text) as Partial<CtrKeyBundle>;
-  if (!parsed || parsed.format !== 'CTR-SIM-KEYBUNDLE-V1' || !parsed.aesKeyslots) {
-    throw new Error('Unrecognized keyfile format (expected CTR-SIM-KEYBUNDLE-V1 JSON or aeskeydb.bin)');
+  if (!parsed || parsed.format !== 'CTR-SIM-KEYBUNDLE-V2' || !parsed.aesKeyslots) {
+    throw new Error('Unrecognized keyfile format (expected CTR-SIM-KEYBUNDLE-V2 JSON or KEY1 aeskeydb.bin)');
   }
-  const out: PartitionKeyOverrideMap = {};
-  const ids: Array<Exclude<PartitionId, 'ncsd_hdr'>> = [
-    'firm0_boot1',
-    'firm1_stage2',
-    'twl_sysdata',
-    'ctrnand_sys',
-    'nand_userdata',
-  ];
-  for (const id of ids) {
+  const keyOverrides: PartitionKeyOverrideMap = {};
+  for (const id of DATA_PARTITION_IDS) {
     const entry = parsed.aesKeyslots[id];
-    if (entry?.keyHex && entry?.initialCounterHex) {
+    if (entry?.keyHex) {
       const keyBytes = hexToBytes(entry.keyHex);
-      const initialCounter = hexToBytes(entry.initialCounterHex);
-      if (keyBytes.byteLength !== 16 || initialCounter.byteLength !== 16) {
-        throw new Error(`Invalid 128-bit key/counter length for ${id}`);
+      if (keyBytes.byteLength !== 16) {
+        throw new Error(`Invalid 128-bit key length for ${id}`);
       }
-      out[id] = { keyBytes, initialCounter };
+      keyOverrides[id] = keyBytes;
     }
   }
-  if (Object.keys(out).length === 0) {
+  const nandCid = parsed.nandCidHex ? hexToBytes(parsed.nandCidHex) : undefined;
+  if (nandCid && nandCid.byteLength !== 16) {
+    throw new Error('Invalid NAND CID length in keyfile (expected 16 bytes)');
+  }
+  if (Object.keys(keyOverrides).length === 0) {
     throw new Error('Keyfile did not contain any valid partition keyslots');
   }
-  return out;
+  return { nandCid, keyOverrides };
 }
 
 // Cached CryptoKey objects for high-throughput block operations
@@ -433,22 +436,41 @@ export async function cryptAesCtr(
   return new Uint8Array(res);
 }
 
+/**
+ * Encrypts/decrypts the 66-byte TWL MBR at Sector 0 offset 0x1BE..0x1FF using Keyslot 0x03 + TWL CID CTR.
+ * Preserves exact 14-byte offset alignment inside AES block 0x1B (0x1B0..0x1BF).
+ */
+export async function cryptTwlMbrBytes(mbr66: Uint8Array): Promise<Uint8Array> {
+  if (mbr66.byteLength !== 66) {
+    throw new Error(`TWL MBR must be 66 bytes (0x1BE..0x1FF), got ${mbr66.byteLength}`);
+  }
+  const counter = await derivePartitionCounter(0x1b0, true);
+  const padded = new Uint8Array(14 + 66);
+  padded.set(mbr66, 14);
+  const outPadded = await cryptAesCtr(padded, CTR_KEYSLOTS.twl_nand.keyBytes, counter);
+  return outPadded.slice(14);
+}
+
 export async function encryptPartition(id: PartitionId, plaintext: Uint8Array): Promise<Uint8Array> {
-  if (id === 'ncsd_hdr') return plaintext; // NCSD master header at sector 0 is unencrypted plaintext
-  const info = CTR_KEYSLOTS[id];
-  return cryptAesCtr(plaintext, info.keyBytes, info.initialCounter);
+  if (id === 'ncsd_hdr') return plaintext;
+  const spec = NAND_PARTITIONS.find((p) => p.id === id)!;
+  const startByte = spec.startChunk * CHUNK_SIZE;
+  const counter = await derivePartitionCounter(startByte, id === 'twl_nand');
+  return cryptAesCtr(plaintext, CTR_KEYSLOTS[id].keyBytes, counter);
 }
 
 export async function decryptPartition(id: PartitionId, ciphertext: Uint8Array): Promise<Uint8Array> {
-  if (id === 'ncsd_hdr') return ciphertext;
-  const info = CTR_KEYSLOTS[id];
-  return cryptAesCtr(ciphertext, info.keyBytes, info.initialCounter);
+  return encryptPartition(id, ciphertext);
 }
 
-/* ==================== 3DS RSA-2048 BOOT9 SIGNATURE VERIFICATION ==================== */
-
-// Nintendo Root CA RSA-2048 public & private keys (JWK) for authentic Boot9 signature validation
-const NINTENDO_ROOT_PUB_JWK: JsonWebKey = {
+/* ==================== SIMULATED BOOT9 NAND-SPECIFIC RSA-2048 SIGNING ==================== */
+/**
+ * NOTE: On retail 3DS hardware, Boot9/Process9 verifies NAND NCSD signatures (0x100..0x1FF)
+ * using Nintendo's dedicated NAND public key (separate from the Gamecard RSA key in ITCM).
+ * Since Nintendo's private key is confidential, this simulator uses a local Boot9 NAND
+ * RSA-2048 keypair (`SIM_BOOT9_NAND_KEY`) over the authentic 256-byte range `0x100..0x1FF`.
+ */
+const SIM_BOOT9_NAND_PUB_JWK: JsonWebKey = {
   key_ops: ['verify'],
   ext: true,
   alg: 'RS256',
@@ -457,7 +479,7 @@ const NINTENDO_ROOT_PUB_JWK: JsonWebKey = {
   e: 'AQAB',
 };
 
-const NINTENDO_ROOT_PRIV_JWK: JsonWebKey = {
+const SIM_BOOT9_NAND_PRIV_JWK: JsonWebKey = {
   key_ops: ['sign'],
   ext: true,
   alg: 'RS256',
@@ -479,7 +501,7 @@ async function getRsaPubKey(): Promise<CryptoKey> {
   if (!cachedRsaPubKey) {
     cachedRsaPubKey = await crypto.subtle.importKey(
       'jwk',
-      NINTENDO_ROOT_PUB_JWK,
+      SIM_BOOT9_NAND_PUB_JWK,
       { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
       false,
       ['verify']
@@ -492,7 +514,7 @@ async function getRsaPrivKey(): Promise<CryptoKey> {
   if (!cachedRsaPrivKey) {
     cachedRsaPrivKey = await crypto.subtle.importKey(
       'jwk',
-      NINTENDO_ROOT_PRIV_JWK,
+      SIM_BOOT9_NAND_PRIV_JWK,
       { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
       false,
       ['sign']
@@ -501,9 +523,6 @@ async function getRsaPrivKey(): Promise<CryptoKey> {
   return cachedRsaPrivKey;
 }
 
-/**
- * Computes a real 256-byte (2048-bit) RSA signature over target binary data using RSASSA-PKCS1-v1_5 + SHA-256.
- */
 export async function signRsa2048(data: Uint8Array): Promise<Uint8Array> {
   const privKey = await getRsaPrivKey();
   const copy = new Uint8Array(data.byteLength);
@@ -512,9 +531,6 @@ export async function signRsa2048(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(sigBuffer);
 }
 
-/**
- * Verifies a 256-byte (2048-bit) RSA signature using the Boot9 embedded Root CA Public Key.
- */
 export async function verifyRsa2048(signature: Uint8Array, data: Uint8Array): Promise<boolean> {
   if (signature.byteLength !== 256) return false;
   try {

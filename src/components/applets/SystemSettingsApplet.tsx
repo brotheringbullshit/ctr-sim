@@ -12,6 +12,7 @@ import { HOME_THEMES } from '../themes';
 import { getTranslations, SUPPORTED_LANGUAGES } from '../../i18n/translations';
 import { soundEngine } from '../../audio/soundEngine';
 import { fcram, RamSnapshot } from '../../ram/fcram';
+import { getNandCidHex } from '../../nand/crypto';
 import {
   CheckCircle2,
   Cpu,
@@ -336,11 +337,11 @@ export const SystemSettingsApplet: React.FC<SystemSettingsProps> = ({
     if (ui.tab === 'nand_fs') {
       const id = config.identity;
       return (
-        <div className="w-full h-full bg-slate-950 text-slate-100 p-3 flex flex-col justify-between select-none font-mono text-[9.5px]">
+        <div className="w-full h-full bg-slate-950 text-slate-100 p-3 flex flex-col justify-between select-none font-mono text-[9px]">
           <div>
             <div className="flex items-center justify-between border-b border-slate-800 pb-1">
-              <span className="text-emerald-400 font-bold">CTRNAND VFS &amp; CONSOLE IDENTITY</span>
-              <span className="text-[8.5px] text-slate-400">4.00 MB / 256 chunks</span>
+              <span className="text-emerald-400 font-bold">eMMC NAND · CTRNAND VFS</span>
+              <span className="text-[8px] text-slate-400">4.00 MB IDB (Old3DS 0x3AF00000)</span>
             </div>
 
             <div className="mt-1.5 grid grid-cols-2 gap-1.5">
@@ -358,18 +359,18 @@ export const SystemSettingsApplet: React.FC<SystemSettingsProps> = ({
               </div>
 
               <div className="bg-slate-900 rounded p-1.5 border border-slate-800">
-                <div className="text-[8px] text-slate-400 uppercase">/data/&lt;ID0&gt;/ &amp; /dbs/</div>
+                <div className="text-[8px] text-slate-400 uppercase">CID-CTR &amp; /data/&lt;ID0&gt;/</div>
+                <div className="text-cyan-300 truncate">CID: {getNandCidHex().slice(0, 16).toUpperCase()}...</div>
                 <div className="text-emerald-300 truncate">ID0: {id?.id0 ?? '...'}</div>
-                <div className="text-slate-300 truncate">ID1: {id?.id1 ?? '...'}</div>
                 <div className="text-slate-400 truncate">
-                  DBs: title, import, ticket, certs
+                  Slots: 0x03/0x04/0x06/0x07
                 </div>
               </div>
             </div>
 
             <div className="mt-1.5 bg-slate-900 rounded p-1.5 border border-slate-800">
               <div className="text-[8px] text-slate-400 uppercase mb-0.5">Mounted CTRNAND Directories</div>
-              <div className="flex flex-wrap gap-1 text-[8.5px]">
+              <div className="flex flex-wrap gap-1 text-[8px]">
                 {ctrNand.nandFsMeta.ctrnandDirs.map((dir) => (
                   <span key={dir} className="px-1.5 py-0.5 rounded bg-slate-800 text-sky-300">
                     {dir}
@@ -379,9 +380,9 @@ export const SystemSettingsApplet: React.FC<SystemSettingsProps> = ({
             </div>
           </div>
 
-          <div className="text-[8.5px] text-slate-400 border-t border-slate-800 pt-1 flex justify-between">
-            <span>TWLN: {ctrNand.nandFsMeta.twlnDirs.join(' ')}</span>
-            <span>AGBSAVE: {ctrNand.nandFsMeta.agbsaveMagic}</span>
+          <div className="text-[8px] text-slate-400 border-t border-slate-800 pt-1 flex justify-between">
+            <span>TWLN (FAT16 0x12E00) · TWLP (FAT12 0x09011A00)</span>
+            <span>AGBSAVE: 0x0B100000 (0x30000)</span>
           </div>
         </div>
       );
@@ -770,7 +771,9 @@ export const SystemSettingsApplet: React.FC<SystemSettingsProps> = ({
                   {p.logicalPartition}{' '}
                   <span className="text-slate-500 font-normal">({p.filesystem})</span>
                 </div>
-                <div className="text-[8.5px] text-slate-500 truncate">{p.description}</div>
+                <div className="text-[8px] text-slate-500 truncate">
+                  HW: {p.realOffsetHex} ({p.realSizeHex}) · Key {p.keyslotHex}
+                </div>
               </div>
               <span className="text-[8.5px] text-sky-700 font-semibold shrink-0">
                 {(p.endChunk - p.startChunk + 1) * 16} KB
